@@ -9,29 +9,15 @@
  * - Makes judgment calls
  *
  * DOES NOT do labor - directs it.
+ *
+ * i[7] update: Now uses LLM intelligence for classification when available.
+ * This breaks the "intelligence deferral pattern" that persisted for 5 passes.
  */
 
 import { ProjectType } from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
-
-// ============================================================================
-// Classification Keywords (heuristic approach for prototype)
-// ============================================================================
-
-const TYPE_KEYWORDS: Record<ProjectType, string[]> = {
-  feature: ['add', 'create', 'implement', 'new', 'build', 'introduce', 'enable'],
-  bugfix: ['fix', 'bug', 'broken', 'error', 'issue', 'wrong', 'failing', 'crash', 'doesn\'t work'],
-  greenfield: ['new project', 'from scratch', 'bootstrap', 'scaffold', 'initialize', 'setup'],
-  refactor: ['refactor', 'restructure', 'reorganize', 'clean up', 'migrate', 'move', 'rename'],
-  research: ['research', 'investigate', 'explore', 'spike', 'prototype', 'evaluate', 'compare'],
-};
-
-const SCOPE_INDICATORS = {
-  small: ['simple', 'quick', 'minor', 'small', 'tweak', 'just'],
-  medium: ['add', 'implement', 'create', 'update'],
-  large: ['major', 'overhaul', 'complete', 'full', 'comprehensive', 'redesign'],
-};
+import { llmClient, type ClassificationResult } from '../llm.js';
 
 // ============================================================================
 // Plant Manager Class
@@ -47,70 +33,24 @@ export class PlantManager {
   /**
    * Classify a raw request into project type and scope
    *
-   * In production, this would use an LLM for nuanced classification.
-   * For the prototype, we use keyword matching + confidence scoring.
+   * i[7] update: Now uses LLM intelligence when available.
+   * Falls back to heuristics when API key not configured.
+   *
+   * This function was the subject of the "intelligence deferral pattern" -
+   * 5 consecutive passes recommended LLM classification but deferred it.
+   * That pattern ends here.
    */
-  classify(rawRequest: string): {
-    projectType: ProjectType;
-    scope: 'small' | 'medium' | 'large';
-    department: 'preparation' | 'r_and_d';
-    confidence: number;
-    reasoning: string;
-  } {
-    const lower = rawRequest.toLowerCase();
+  async classify(rawRequest: string): Promise<ClassificationResult> {
+    const result = await llmClient.classify(rawRequest);
 
-    // Score each project type
-    const typeScores: Record<ProjectType, number> = {
-      feature: 0,
-      bugfix: 0,
-      greenfield: 0,
-      refactor: 0,
-      research: 0,
-    };
-
-    for (const [type, keywords] of Object.entries(TYPE_KEYWORDS)) {
-      for (const keyword of keywords) {
-        if (lower.includes(keyword)) {
-          typeScores[type as ProjectType] += 1;
-        }
-      }
+    // Log the method used
+    if (result.method === 'llm') {
+      console.log('[PlantManager] Using LLM classification');
+    } else {
+      console.log('[PlantManager] Using heuristic classification (no API key)');
     }
 
-    // Find winner
-    let bestType: ProjectType = 'feature';
-    let bestScore = 0;
-    for (const [type, score] of Object.entries(typeScores)) {
-      if (score > bestScore) {
-        bestScore = score;
-        bestType = type as ProjectType;
-      }
-    }
-
-    // Calculate confidence (higher score = more confident)
-    const totalKeywords = Object.values(TYPE_KEYWORDS).flat().length;
-    const confidence = Math.min(0.3 + (bestScore * 0.2), 0.95); // 30% base, +20% per keyword, max 95%
-
-    // Determine scope
-    let scope: 'small' | 'medium' | 'large' = 'medium';
-    for (const [s, indicators] of Object.entries(SCOPE_INDICATORS)) {
-      if (indicators.some(i => lower.includes(i))) {
-        scope = s as 'small' | 'medium' | 'large';
-        break;
-      }
-    }
-
-    // Route decision: research and greenfield go to R&D first
-    const department = ['research', 'greenfield'].includes(bestType) ? 'r_and_d' : 'preparation';
-
-    const reasoning = [
-      `Detected type: ${bestType} (score: ${bestScore})`,
-      `Matched keywords: ${TYPE_KEYWORDS[bestType].filter(k => lower.includes(k)).join(', ')}`,
-      `Scope: ${scope}`,
-      `Routing to: ${department}`,
-      `Confidence: ${(confidence * 100).toFixed(0)}%`,
-    ].join('\n');
-
-    return { projectType: bestType, scope, department, confidence, reasoning };
+    return result;
   }
 
   /**
@@ -120,7 +60,7 @@ export class PlantManager {
    */
   async intake(rawRequest: string): Promise<{
     taskId: string;
-    classification: ReturnType<PlantManager['classify']>;
+    classification: ClassificationResult;
     needsHumanSync: boolean;
     humanSyncReason?: string;
   }> {
@@ -128,9 +68,9 @@ export class PlantManager {
     const task = taskManager.createTask(rawRequest);
     console.log(`[PlantManager] Created task: ${task.id}`);
 
-    // Classify
-    const classification = this.classify(rawRequest);
-    console.log(`[PlantManager] Classification:\n${classification.reasoning}`);
+    // Classify (now async - uses LLM when available)
+    const classification = await this.classify(rawRequest);
+    console.log(`[PlantManager] Classification (${classification.method}):\n${classification.reasoning}`);
 
     // Set classification on task
     taskManager.setClassification(task.id, {

@@ -14,6 +14,7 @@ import { createPlantManager } from './departments/plant-manager.js';
 import { createPreparationForeman } from './departments/preparation.js';
 import { taskManager } from './state.js';
 import { mandrel } from './mandrel.js';
+import { llmClient, type QualityEvaluation } from './llm.js';
 
 // ============================================================================
 // Forge Engine
@@ -44,6 +45,7 @@ export class ForgeEngine {
     taskId: string;
     stage: string;
     result?: unknown;
+    qualityEvaluation?: QualityEvaluation;
     needsHumanSync?: boolean;
     humanSyncReason?: string;
   }> {
@@ -94,6 +96,47 @@ export class ForgeEngine {
       };
     }
 
+    // Phase 3: Quality Evaluation (NEW - i[7])
+    console.log('\n' + '─'.repeat(40));
+    console.log('PHASE 3: PREPARATION QUALITY EVALUATION (i[7])');
+    console.log('─'.repeat(40));
+
+    const pkg = preparation.package!;
+    const qualityEval = await llmClient.evaluateContextPackage(pkg, projectPath);
+
+    console.log(`\n[Quality Evaluation] Method: ${qualityEval.method}`);
+    console.log(`[Quality Evaluation] Score: ${qualityEval.score}/100`);
+    console.log(`[Quality Evaluation] Passed: ${qualityEval.passed ? 'YES' : 'NO'}`);
+
+    if (qualityEval.issues.length > 0) {
+      console.log('\nIssues:');
+      for (const issue of qualityEval.issues) {
+        console.log(`  [${issue.severity.toUpperCase()}] ${issue.area}: ${issue.description}`);
+        console.log(`    → ${issue.recommendation}`);
+      }
+    }
+
+    if (qualityEval.strengths.length > 0) {
+      console.log('\nStrengths:');
+      for (const strength of qualityEval.strengths) {
+        console.log(`  ✓ ${strength}`);
+      }
+    }
+
+    console.log(`\nReasoning: ${qualityEval.reasoning}`);
+
+    // Store quality evaluation to Mandrel
+    await mandrel.storeContext(
+      `ContextPackage Quality Evaluation:\n` +
+      `Score: ${qualityEval.score}/100 (${qualityEval.passed ? 'PASSED' : 'FAILED'})\n` +
+      `Method: ${qualityEval.method}\n` +
+      `Issues: ${qualityEval.issues.length}\n` +
+      `Strengths: ${qualityEval.strengths.length}\n` +
+      `Reasoning: ${qualityEval.reasoning}`,
+      'planning',
+      ['quality-evaluation', 'context-package', qualityEval.passed ? 'passed' : 'needs-improvement']
+    );
+
     // Success - ContextPackage ready
     console.log('\n' + '─'.repeat(40));
     console.log('RESULT: ContextPackage Ready');
@@ -103,7 +146,6 @@ export class ForgeEngine {
     console.log(taskManager.getTaskSummary(intake.taskId));
 
     // Check if human sync needed before execution
-    const pkg = preparation.package!;
     if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0) {
       console.log('\n⚠️  Human Sync Required Before Execution:');
       for (const action of pkg.humanSync.requiredBefore) {
@@ -146,14 +188,17 @@ export class ForgeEngine {
     console.log('');
     console.log(`Then run: cd ${forgeEnginePath} && npx tsx src/report.ts --json report.json`);
 
-    if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0) {
+    if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0 || !qualityEval.passed) {
       return {
         success: true,
         taskId: intake.taskId,
         stage: 'prepared',
         result: pkg,
+        qualityEvaluation: qualityEval,
         needsHumanSync: true,
-        humanSyncReason: 'Ambiguities or risks identified. Review ContextPackage before execution.',
+        humanSyncReason: !qualityEval.passed
+          ? `ContextPackage quality score ${qualityEval.score}/100 below threshold. Review issues before execution.`
+          : 'Ambiguities or risks identified. Review ContextPackage before execution.',
       };
     }
 
@@ -162,6 +207,7 @@ export class ForgeEngine {
       taskId: intake.taskId,
       stage: 'prepared',
       result: pkg,
+      qualityEvaluation: qualityEval,
     };
   }
 
@@ -191,7 +237,7 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[6]'); // Current instance (updated by i[6])
+  const engine = new ForgeEngine('i[7]'); // Current instance (updated by i[7] - LLM intelligence added)
   const result = await engine.process(request, projectPath);
 
   console.log('\n' + '═'.repeat(60));
@@ -208,3 +254,4 @@ export { taskManager, mandrel };
 export { createLearningRetriever, createFeedbackRecorder } from './learning.js';
 export { createQualityGate, QualityGate } from './departments/quality-gate.js';
 export { reportExecution } from './report.js';
+export { llmClient, createLLMClient, type ClassificationResult, type QualityEvaluation } from './llm.js';
