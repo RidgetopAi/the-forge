@@ -157,7 +157,7 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[2]'); // Current instance
+  const engine = new ForgeEngine('i[5]'); // Current instance (updated by i[5])
   const result = await engine.process(request, projectPath);
 
   console.log('\n' + '═'.repeat(60));
@@ -171,3 +171,5 @@ main().catch(console.error);
 
 // Export for programmatic use
 export { taskManager, mandrel };
+export { createLearningRetriever, createFeedbackRecorder } from './learning.js';
+export { createQualityGate, QualityGate } from './departments/quality-gate.js';

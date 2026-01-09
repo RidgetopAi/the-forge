@@ -252,3 +252,110 @@ export const HumanSyncRequest = z.object({
   }).optional(),
 });
 export type HumanSyncRequest = z.infer<typeof HumanSyncRequest>;
+
+// ============================================================================
+// Execution Feedback (for learning loop)
+// ============================================================================
+
+/**
+ * Captures the results of executing a ContextPackage.
+ * This is the feedback signal that enables compound learning.
+ *
+ * Key insight from i[4]: Without feedback, preparations repeat mistakes.
+ * This schema captures what actually happened vs what was predicted,
+ * enabling future preparations to learn from past executions.
+ */
+export const ExecutionFeedback = z.object({
+  id: z.string().uuid(),
+  taskId: z.string().uuid(),
+  contextPackageId: z.string().uuid(),
+  executedBy: z.string(), // Instance ID (e.g., "i[4]")
+  timestamp: z.date(),
+
+  // What actually happened
+  outcome: z.object({
+    success: z.boolean(),
+    filesActuallyModified: z.array(z.string()),
+    filesActuallyRead: z.array(z.string()),
+    testsRan: z.boolean(),
+    testsPassed: z.boolean().optional(),
+    compilationPassed: z.boolean(),
+    executionTimeMs: z.number().optional(),
+  }),
+
+  // Delta from prediction (the learning signal)
+  accuracy: z.object({
+    // Files that were predicted vs actually needed
+    mustReadAccuracy: z.object({
+      predicted: z.array(z.string()),   // From ContextPackage.codeContext.mustRead
+      actual: z.array(z.string()),      // What was actually read
+      missed: z.array(z.string()),      // Needed but not predicted
+      unnecessary: z.array(z.string()), // Predicted but not needed
+    }),
+    // Pattern accuracy
+    patternsFollowed: z.array(z.string()),
+    patternsViolated: z.array(z.object({
+      pattern: z.string(),
+      violation: z.string(),
+      reason: z.string().optional(),
+    })),
+  }),
+
+  // Learnings (synthesized insights)
+  learnings: z.array(z.object({
+    type: z.enum(['insight', 'correction', 'pattern', 'warning']),
+    content: z.string(),
+    tags: z.array(z.string()),
+  })),
+
+  // Human feedback (optional - from Quality Gate)
+  humanFeedback: z.object({
+    approved: z.boolean(),
+    comments: z.string().optional(),
+    corrections: z.array(z.string()),
+  }).optional(),
+});
+export type ExecutionFeedback = z.infer<typeof ExecutionFeedback>;
+
+// ============================================================================
+// Historical Context (retrieved from Mandrel for preparation)
+// ============================================================================
+
+/**
+ * Context retrieved from Mandrel to inform preparation.
+ * This is what LearningRetriever produces.
+ */
+export const HistoricalContext = z.object({
+  // Previous attempts at similar tasks
+  previousAttempts: z.array(z.object({
+    taskDescription: z.string(),
+    outcome: z.enum(['success', 'partial', 'failed']),
+    keyFiles: z.array(z.string()),
+    lesson: z.string(),
+    relevanceScore: z.number(), // Semantic similarity to current task
+  })),
+
+  // Related decisions made in this project
+  relatedDecisions: z.array(z.object({
+    title: z.string(),
+    decision: z.string(),
+    rationale: z.string(),
+    tags: z.array(z.string()),
+  })),
+
+  // Patterns that worked or failed
+  patternHistory: z.array(z.object({
+    pattern: z.string(),
+    successRate: z.number(), // 0-1
+    lastUsed: z.date(),
+    context: z.string(),
+  })),
+
+  // Files frequently modified together (co-modification patterns)
+  coModificationPatterns: z.array(z.object({
+    files: z.array(z.string()),
+    frequency: z.number(),
+    typicalTask: z.string(),
+  })),
+});
+export type HistoricalContext = z.infer<typeof HistoricalContext>;

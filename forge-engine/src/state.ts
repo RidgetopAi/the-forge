@@ -18,7 +18,7 @@ const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
   preparing: ['prepared', 'blocked', 'failed'],
   prepared: ['executing', 'blocked', 'failed'],
   executing: ['reviewing', 'preparing', 'blocked', 'failed'], // can loop back
-  reviewing: ['documenting', 'executing', 'blocked', 'failed'], // can reject
+  reviewing: ['documenting', 'executing', 'completed', 'blocked', 'failed'], // can approve directly (i[5]) or reject
   documenting: ['completed', 'blocked', 'failed'],
   completed: [], // terminal
   blocked: ['intake', 'classified', 'preparing', 'prepared', 'executing', 'reviewing', 'documenting'], // can resume
@@ -141,6 +141,51 @@ export class TaskManager {
     if (!task) return false;
 
     task.escalation = escalation;
+    task.updated = new Date();
+    return true;
+  }
+
+  /**
+   * Set execution result (Execution Department output)
+   * Added by i[5]
+   */
+  setExecutionResult(
+    taskId: string,
+    executionResult: {
+      success: boolean;
+      filesCreated: string[];
+      filesModified: string[];
+      testsPassed?: boolean;
+      notes?: string;
+    }
+  ): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+
+    task.executionResult = executionResult;
+    task.updated = new Date();
+    return true;
+  }
+
+  /**
+   * Set quality result (Quality Gate output)
+   * Added by i[5]
+   */
+  setQualityResult(
+    taskId: string,
+    qualityResult: {
+      passed: boolean;
+      checks: Array<{
+        check: string;
+        passed: boolean;
+        notes?: string;
+      }>;
+    }
+  ): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+
+    task.qualityResult = qualityResult;
     task.updated = new Date();
     return true;
   }

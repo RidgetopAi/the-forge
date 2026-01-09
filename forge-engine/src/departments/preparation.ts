@@ -10,9 +10,10 @@
  * This prototype implements the 7-phase protocol from SIRK Pass #1.
  */
 
-import { ContextPackage, ProjectType } from '../types.js';
+import { ContextPackage, ProjectType, HistoricalContext } from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
+import { createLearningRetriever, LearningRetriever } from '../learning.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
@@ -237,12 +238,14 @@ export class PreparationForeman {
   private fileWorker: FileDiscoveryWorker;
   private patternWorker: PatternExtractionWorker;
   private architectureWorker: ArchitectureAnalysisWorker;
+  private learningRetriever: LearningRetriever;
 
   constructor(instanceId: string) {
     this.instanceId = instanceId;
     this.fileWorker = new FileDiscoveryWorker();
     this.patternWorker = new PatternExtractionWorker();
     this.architectureWorker = new ArchitectureAnalysisWorker();
+    this.learningRetriever = createLearningRetriever(instanceId);
   }
 
   /**
@@ -300,6 +303,14 @@ export class PreparationForeman {
       console.log('[Foreman:Preparation] Phase 5: Risk Assessment');
       const risks = this.assessRisks(task, fileResult, archResult);
 
+      // Phase 5.5: Learning Retrieval (added by i[4])
+      // This is the key to compound learning - retrieve historical context
+      console.log('[Foreman:Preparation] Phase 5.5: Learning Retrieval (i[4])');
+      const historicalContext = await this.learningRetriever.retrieve(
+        task.rawRequest,
+        projectPath
+      );
+
       // Phase 6: Package Validation (internal)
       console.log('[Foreman:Preparation] Phase 6: Package Validation');
 
@@ -329,20 +340,46 @@ export class PreparationForeman {
         },
 
         codeContext: {
-          mustRead: fileResult.relevantFiles
-            .filter(f => f.priority === 'high')
-            .map(f => ({
-              path: f.path,
-              reason: f.reason,
-            })),
+          // Combine file discovery with historical learning (i[4])
+          mustRead: [
+            // Files from keyword search
+            ...fileResult.relevantFiles
+              .filter(f => f.priority === 'high')
+              .map(f => ({
+                path: f.path,
+                reason: f.reason,
+              })),
+            // Files from previous similar tasks (learning retrieval)
+            ...historicalContext.previousAttempts
+              .flatMap(attempt => attempt.keyFiles.map(path => ({
+                path,
+                reason: `From previous task: "${attempt.taskDescription.substring(0, 30)}..."`,
+              })))
+              .slice(0, 3), // Limit historical files
+          ].filter((f, i, arr) =>
+            // Deduplicate by path
+            arr.findIndex(x => x.path === f.path) === i
+          ),
           mustNotModify: [], // Would be populated by deeper analysis
-          relatedExamples: fileResult.relevantFiles
-            .filter(f => f.priority !== 'high')
-            .slice(0, 5)
-            .map(f => ({
-              path: f.path,
-              similarity: f.reason,
-            })),
+          relatedExamples: [
+            // Files from keyword search
+            ...fileResult.relevantFiles
+              .filter(f => f.priority !== 'high')
+              .slice(0, 5)
+              .map(f => ({
+                path: f.path,
+                similarity: f.reason,
+              })),
+            // Files from co-modification patterns (learning retrieval)
+            ...historicalContext.coModificationPatterns
+              .flatMap(p => p.files.map(path => ({
+                path,
+                similarity: `Co-modified in: ${p.typicalTask}`,
+              })))
+              .slice(0, 3),
+          ].filter((f, i, arr) =>
+            arr.findIndex(x => x.path === f.path) === i
+          ),
         },
 
         patterns: {
@@ -363,9 +400,17 @@ export class PreparationForeman {
 
         risks,
 
+        // History section now populated by LearningRetriever (i[4])
         history: {
-          previousAttempts: [],
-          relatedDecisions: [],
+          previousAttempts: historicalContext.previousAttempts.map(attempt => ({
+            what: attempt.taskDescription,
+            result: attempt.outcome,
+            lesson: attempt.lesson,
+          })),
+          relatedDecisions: historicalContext.relatedDecisions.map(decision => ({
+            decision: decision.title,
+            rationale: decision.rationale,
+          })),
         },
 
         humanSync: {
