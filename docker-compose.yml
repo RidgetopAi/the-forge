@@ -1,0 +1,60 @@
+# THE FORGE - Docker Compose Configuration
+# Run with: docker compose up -d
+# Execute commands: docker compose exec forge <command>
+# Get shell: docker compose exec forge bash
+
+services:
+  forge:
+    image: the-forge:v1
+    # To rebuild: docker build -t the-forge:v1 .
+    container_name: the-forge
+    hostname: forge
+
+    # Mount project directories
+    volumes:
+      # Your projects (read-write)
+      - ~/projects:/workspace/projects
+
+      # SSH keys for Mandrel/VPS access (read-only)
+      - ~/.ssh:/home/forge/.ssh:ro
+
+      # Git config (read-only)
+      - ~/.gitconfig:/home/forge/.gitconfig:ro
+
+      # Docker socket (for Docker-in-Docker capabilities)
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Persist bash history
+      - forge-history:/home/forge/.bash_history_dir
+
+      # Persist npm/pnpm cache
+      - forge-npm-cache:/home/forge/.npm
+      - forge-pnpm-cache:/home/forge/.local/share/pnpm
+
+    # Environment variables
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      # Add more as needed
+
+    # Network mode: host gives full network access (simpler for SSH, etc.)
+    # Alternative: bridge with port mappings
+    network_mode: host
+
+    # Keep running
+    stdin_open: true
+    tty: true
+
+    # Resource limits (adjust based on your machine)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '4'
+    #       memory: 8G
+
+# Named volumes for persistence
+volumes:
+  forge-history:
+  forge-npm-cache:
+  forge-pnpm-cache:
