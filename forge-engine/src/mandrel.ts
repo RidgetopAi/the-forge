@@ -3,12 +3,92 @@
  *
  * Wraps the SSH+curl pattern for accessing Mandrel from within the-forge container.
  * Provides typed access to Mandrel MCP tools.
+ *
+ * Error handling (added by i[3]):
+ * - Distinguishes error types (SSH, JSON parse, timeout, connection)
+ * - Retries transient failures with exponential backoff
+ * - Tracks connection health
  */
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+export type MandrelErrorType =
+  | 'ssh_failed'        // SSH connection to hetzner failed
+  | 'timeout'           // Request timed out
+  | 'json_parse'        // Response wasn't valid JSON
+  | 'connection'        // curl couldn't connect to localhost:8080
+  | 'tool_error'        // Mandrel tool returned an error
+  | 'unknown';          // Catch-all
+
+export interface MandrelError {
+  type: MandrelErrorType;
+  message: string;
+  retriable: boolean;
+  originalError?: unknown;
+}
+
+function classifyError(error: unknown, stderr: string = ''): MandrelError {
+  const message = error instanceof Error ? error.message : String(error);
+  const combined = `${message} ${stderr}`.toLowerCase();
+
+  // SSH failures
+  if (combined.includes('ssh') || combined.includes('connection refused') ||
+      combined.includes('host key') || combined.includes('permission denied')) {
+    return {
+      type: 'ssh_failed',
+      message: `SSH connection failed: ${message}`,
+      retriable: true,
+      originalError: error,
+    };
+  }
+
+  // Timeouts
+  if (combined.includes('timeout') || combined.includes('etimedout') ||
+      combined.includes('timedout')) {
+    return {
+      type: 'timeout',
+      message: `Request timed out: ${message}`,
+      retriable: true,
+      originalError: error,
+    };
+  }
+
+  // Connection issues (curl can't reach server)
+  if (combined.includes('connection') || combined.includes('econnrefused') ||
+      combined.includes('could not resolve')) {
+    return {
+      type: 'connection',
+      message: `Cannot connect to Mandrel server: ${message}`,
+      retriable: true,
+      originalError: error,
+    };
+  }
+
+  // JSON parse errors
+  if (combined.includes('json') || combined.includes('unexpected token') ||
+      combined.includes('syntaxerror')) {
+    return {
+      type: 'json_parse',
+      message: `Invalid JSON response: ${message}`,
+      retriable: false,
+      originalError: error,
+    };
+  }
+
+  return {
+    type: 'unknown',
+    message,
+    retriable: false,
+    originalError: error,
+  };
+}
 
 // ============================================================================
 // Mandrel Response Types
@@ -23,6 +103,7 @@ interface MandrelResponse<T = unknown> {
     }>;
   };
   error?: string;
+  errorDetails?: MandrelError;
 }
 
 interface StoredContext {
@@ -39,33 +120,134 @@ interface StoredContext {
 
 export class MandrelClient {
   private project: string;
+  private consecutiveFailures: number = 0;
+  private lastSuccessTime: Date | null = null;
+  private readonly maxRetries: number = 3;
+  private readonly baseDelayMs: number = 500;
 
   constructor(project: string = 'the-forge') {
     this.project = project;
   }
 
   /**
-   * Execute a Mandrel MCP tool via SSH+curl
+   * Get connection health status
    */
-  private async call<T>(toolName: string, args: Record<string, unknown> = {}): Promise<MandrelResponse<T>> {
+  getHealthStatus(): {
+    healthy: boolean;
+    consecutiveFailures: number;
+    lastSuccess: Date | null;
+  } {
+    return {
+      healthy: this.consecutiveFailures < 3,
+      consecutiveFailures: this.consecutiveFailures,
+      lastSuccess: this.lastSuccessTime,
+    };
+  }
+
+  /**
+   * Sleep for a given number of milliseconds
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Execute a single call attempt
+   */
+  private async executeCall<T>(
+    toolName: string,
+    command: string
+  ): Promise<MandrelResponse<T>> {
+    try {
+      const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
+
+      // Check for stderr without stdout (usually means failure)
+      if (stderr && !stdout) {
+        const errorDetails = classifyError(new Error(stderr), stderr);
+        return {
+          success: false,
+          error: stderr,
+          errorDetails,
+        };
+      }
+
+      // Attempt to parse JSON response
+      try {
+        const response = JSON.parse(stdout) as MandrelResponse<T>;
+        return response;
+      } catch (parseError) {
+        const errorDetails = classifyError(parseError, stdout);
+        return {
+          success: false,
+          error: `Invalid JSON response from ${toolName}`,
+          errorDetails,
+        };
+      }
+    } catch (error) {
+      const errorDetails = classifyError(error, '');
+      return {
+        success: false,
+        error: errorDetails.message,
+        errorDetails,
+      };
+    }
+  }
+
+  /**
+   * Execute a Mandrel MCP tool via SSH+curl with retry logic
+   */
+  private async call<T>(
+    toolName: string,
+    args: Record<string, unknown> = {},
+    options: { retries?: number } = {}
+  ): Promise<MandrelResponse<T>> {
+    const maxRetries = options.retries ?? this.maxRetries;
     const argsJson = JSON.stringify({ arguments: args });
     // Escape single quotes in JSON for shell
     const escapedArgs = argsJson.replace(/'/g, "'\\''");
 
     const command = `ssh hetzner 'curl -s -X POST http://localhost:8080/mcp/tools/${toolName} -H "Content-Type: application/json" -d '\\''${escapedArgs}'\\'''`;
 
-    try {
-      const { stdout, stderr } = await execAsync(command, { timeout: 30000 });
-      if (stderr && !stdout) {
-        return { success: false, error: stderr };
+    let lastError: MandrelError | undefined;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        // Exponential backoff: 500ms, 1000ms, 2000ms, ...
+        const delay = this.baseDelayMs * Math.pow(2, attempt - 1);
+        await this.sleep(delay);
       }
-      return JSON.parse(stdout) as MandrelResponse<T>;
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      };
+
+      const response = await this.executeCall<T>(toolName, command);
+
+      // Success - reset failure counter and return
+      if (response.success) {
+        this.consecutiveFailures = 0;
+        this.lastSuccessTime = new Date();
+        return response;
+      }
+
+      // Check if error is retriable
+      const errorDetails = response.errorDetails;
+      if (!errorDetails?.retriable || attempt === maxRetries) {
+        this.consecutiveFailures++;
+        return response;
+      }
+
+      // Log retry attempt
+      lastError = errorDetails;
+      console.warn(
+        `[MandrelClient] ${toolName} failed (attempt ${attempt + 1}/${maxRetries + 1}): ` +
+        `${errorDetails.type} - ${errorDetails.message}. Retrying...`
+      );
     }
+
+    // Should not reach here, but just in case
+    this.consecutiveFailures++;
+    return {
+      success: false,
+      error: lastError?.message ?? 'Max retries exceeded',
+      errorDetails: lastError,
+    };
   }
 
   /**
