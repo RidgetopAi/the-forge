@@ -112,7 +112,41 @@ export class ForgeEngine {
       for (const ambiguity of pkg.humanSync.ambiguities) {
         console.log(`  - Ambiguity: ${ambiguity}`);
       }
+    }
 
+    // Output POST-EXECUTION instructions (added by i[6])
+    // Determine forge-engine path (handle both direct and subdirectory layouts)
+    const forgeEnginePath = projectPath.includes('forge-engine')
+      ? projectPath
+      : `${projectPath}/forge-engine`;
+
+    console.log('\n' + '─'.repeat(40));
+    console.log('POST-EXECUTION: Report Your Results');
+    console.log('─'.repeat(40));
+    console.log('\nAfter executing this task, run the following to close the loop:');
+    console.log('');
+    console.log(`  cd ${forgeEnginePath}`);
+    console.log(`  npx tsx src/report.ts ${projectPath} ${pkg.id} \\`);
+    console.log(`    --success \\`);
+    console.log(`    --files=<modified-files> \\`);
+    console.log(`    --learning="<what-you-learned>"`);
+    console.log('');
+    console.log('Or create a report.json file:');
+    console.log(JSON.stringify({
+      projectPath,
+      contextPackageId: pkg.id,
+      taskId: intake.taskId,
+      success: true,
+      filesCreated: ['<new-file.ts>'],
+      filesModified: ['<modified-file.ts>'],
+      filesRead: ['<read-file.ts>'],
+      learnings: ['What you learned'],
+      notes: 'Optional notes',
+    }, null, 2));
+    console.log('');
+    console.log(`Then run: cd ${forgeEnginePath} && npx tsx src/report.ts --json report.json`);
+
+    if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0) {
       return {
         success: true,
         taskId: intake.taskId,
@@ -157,7 +191,7 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[5]'); // Current instance (updated by i[5])
+  const engine = new ForgeEngine('i[6]'); // Current instance (updated by i[6])
   const result = await engine.process(request, projectPath);
 
   console.log('\n' + '═'.repeat(60));
@@ -173,3 +207,4 @@ main().catch(console.error);
 export { taskManager, mandrel };
 export { createLearningRetriever, createFeedbackRecorder } from './learning.js';
 export { createQualityGate, QualityGate } from './departments/quality-gate.js';
+export { reportExecution } from './report.js';

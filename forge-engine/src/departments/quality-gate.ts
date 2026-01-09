@@ -72,18 +72,29 @@ export class QualityGate {
    * Run all quality checks on execution results.
    *
    * This is the main entry point for the Quality Gate.
+   *
+   * Updated by i[6]: Now accepts ContextPackage directly via options
+   * to support cross-session execution (where taskManager state is lost).
    */
   async validate(
     taskId: string,
     projectPath: string,
-    executionResult: ExecutionResult
+    executionResult: ExecutionResult,
+    options?: { contextPackage?: ContextPackage }
   ): Promise<QualityGateResult> {
-    const task = taskManager.getTask(taskId);
-    if (!task || !task.contextPackage) {
+    // Try provided ContextPackage first, fall back to taskManager (i[6])
+    let contextPackage = options?.contextPackage;
+    let task = taskManager.getTask(taskId);
+
+    if (!contextPackage && task?.contextPackage) {
+      contextPackage = task.contextPackage;
+    }
+
+    if (!contextPackage) {
       return {
         passed: false,
         checks: [],
-        summary: 'Task or ContextPackage not found',
+        summary: 'ContextPackage not found - provide via options or ensure task exists in taskManager',
         recommendation: 'reject',
         failedRequired: 1,
         failedOptional: 0,
@@ -92,8 +103,10 @@ export class QualityGate {
 
     console.log(`[QualityGate] Running quality checks for task ${taskId}`);
 
-    // Transition task to reviewing state
-    taskManager.transitionState(taskId, 'reviewing', this.instanceId, 'Quality Gate validation');
+    // Transition task to reviewing state (if task exists in this session - i[6])
+    if (task) {
+      taskManager.transitionState(taskId, 'reviewing', this.instanceId, 'Quality Gate validation');
+    }
 
     // Run all checks
     const checks: QualityCheckResult[] = [];
@@ -109,7 +122,7 @@ export class QualityGate {
 
     // Acceptance criteria checks
     const criteriaChecks = await this.checkAcceptanceCriteria(
-      task.contextPackage,
+      contextPackage,
       executionResult
     );
     checks.push(...criteriaChecks);
@@ -141,8 +154,10 @@ export class QualityGate {
       failedOptional,
     };
 
-    // Store quality result on task
-    taskManager.setQualityResult(taskId, result);
+    // Store quality result on task (if task exists in this session - i[6])
+    if (task) {
+      taskManager.setQualityResult(taskId, result);
+    }
 
     // Log to Mandrel
     await mandrel.storeContext(
@@ -156,11 +171,13 @@ export class QualityGate {
       ['quality-gate', passed ? 'passed' : 'failed', this.instanceId]
     );
 
-    // Transition state based on result
-    if (passed) {
-      taskManager.transitionState(taskId, 'completed', this.instanceId, 'Quality Gate passed');
-    } else {
-      taskManager.transitionState(taskId, 'blocked', this.instanceId, 'Quality Gate failed');
+    // Transition state based on result (if task exists in this session - i[6])
+    if (task) {
+      if (passed) {
+        taskManager.transitionState(taskId, 'completed', this.instanceId, 'Quality Gate passed');
+      } else {
+        taskManager.transitionState(taskId, 'blocked', this.instanceId, 'Quality Gate failed');
+      }
     }
 
     console.log(`[QualityGate] ${passed ? 'PASSED' : 'FAILED'}: ${result.summary}`);
