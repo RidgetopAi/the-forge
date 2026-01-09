@@ -21,6 +21,9 @@ services:
       # Git config (read-only)
       - ~/.gitconfig:/home/forge/.gitconfig:ro
 
+      # Claude Code auth (persist login between container restarts)
+      - ~/.claude:/home/forge/.claude
+
       # Docker socket (for Docker-in-Docker capabilities)
       - /var/run/docker.sock:/var/run/docker.sock
 
