@@ -834,6 +834,56 @@ class FileDiscoveryWorker {
       }
     }
 
+    // i[23]: API/endpoint task detection
+    // When task mentions endpoint, route, API, HTTP - find server/route files
+    if (lower.includes('endpoint') || lower.includes('route') || lower.includes('api') ||
+        lower.includes('http') || lower.includes('rest') || lower.includes('handler')) {
+      console.log('[Worker:FileDiscovery] Detected: API/endpoint task');
+
+      // Find server entry points and route files
+      const apiPatterns = ['server.ts', 'app.ts', 'routes.ts', 'api.ts', 'index.ts', 'main.ts'];
+      for (const pattern of apiPatterns) {
+        try {
+          const { stdout } = await execAsync(
+            `find "${projectPath}" -type f -name "${pattern}" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
+            { timeout: 3000 }
+          );
+          for (const file of stdout.trim().split('\n').filter(Boolean)) {
+            files.push({ path: file, reason: `API server/route file: ${pattern}` });
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Find files in API-related directories
+      const apiDirs = ['api', 'routes', 'controllers', 'handlers', 'endpoints'];
+      for (const dir of apiDirs) {
+        try {
+          const { stdout } = await execAsync(
+            `find "${projectPath}" -type f -path "*/${dir}/*" -name "*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
+            { timeout: 3000 }
+          );
+          for (const file of stdout.trim().split('\n').filter(Boolean)) {
+            if (!files.find(f => f.path === file)) {
+              files.push({ path: file, reason: `File in ${dir}/ directory` });
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Find files containing Express route definitions
+      try {
+        const { stdout } = await execAsync(
+          `rg -l "app\\.(get|post|put|delete|patch)\\(" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -5`,
+          { timeout: 5000 }
+        );
+        for (const file of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === file)) {
+            files.push({ path: file, reason: 'Contains Express route definitions' });
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
     return files;
   }
 

@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[22]: Updated instance ID - adds Anthropic tool_use for reliable code generation
-  const engine = new ForgeEngine('i[22]');
+  // i[23]: Fixed Human Sync false positive + external project validation
+  const engine = new ForgeEngine('i[23]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

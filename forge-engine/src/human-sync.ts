@@ -319,15 +319,20 @@ export const ambiguousTargetTrigger: HumanSyncTrigger = {
     }
 
     // Task mentions specific file/function but not found
+    // i[23]: Fixed false positive - exclude common words like "called", "named", etc.
     const request = ctx.task?.rawRequest ?? '';
     const mentionsSpecific = /\b(file|function|class|method|component)\s+(\w+)/i.exec(request);
     if (mentionsSpecific) {
       const mentionedName = mentionsSpecific[2].toLowerCase();
-      const foundInMustRead = pkg.codeContext.mustRead.some(f =>
-        f.path.toLowerCase().includes(mentionedName)
-      );
-      if (!foundInMustRead) {
-        issues.push(`Task mentions "${mentionsSpecific[2]}" but not found in codeContext`);
+      // Skip common verbs/words that aren't actual names
+      const commonWords = ['called', 'named', 'defined', 'that', 'which', 'the', 'a', 'an', 'to', 'for', 'with', 'from', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'can', 'could', 'like', 'new', 'add', 'create', 'simple', 'basic', 'helper', 'utility'];
+      if (!commonWords.includes(mentionedName)) {
+        const foundInMustRead = pkg.codeContext.mustRead.some(f =>
+          f.path.toLowerCase().includes(mentionedName)
+        );
+        if (!foundInMustRead) {
+          issues.push(`Task mentions "${mentionsSpecific[2]}" but not found in codeContext`);
+        }
       }
     }
 
