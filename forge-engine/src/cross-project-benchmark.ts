@@ -538,7 +538,7 @@ async function main() {
     process.exit(1);
   }
 
-  const runner = new CrossProjectBenchmarkRunner('i[35]');
+  const runner = new CrossProjectBenchmarkRunner('i[36]');
   await runner.runAll({ dryRun, projectFilter });
 }
 
