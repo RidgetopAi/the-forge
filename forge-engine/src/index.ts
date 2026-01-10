@@ -370,8 +370,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[15]: Added Human Sync Protocol - active trigger detection and question generation
-  const engine = new ForgeEngine('i[15]');
+  // i[16]: Added Context Budget Manager - intelligent context management
+  const engine = new ForgeEngine('i[16]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -391,3 +391,16 @@ export { createExecutionForeman, ExecutionForeman } from './departments/executio
 export { reportExecution } from './report.js';
 export { llmClient, createLLMClient, type ClassificationResult, type QualityEvaluation } from './llm.js';
 export { createHumanSyncService, HumanSyncService, builtInTriggers, type GeneratedQuestion } from './human-sync.js';
+// i[16]: Context Budget Manager exports
+export {
+  TokenCounter,
+  ContextBudgetManager,
+  FileContentExtractor,
+  processFilesWithBudget,
+  createTokenCounter,
+  createContextBudgetManager,
+  createFileContentExtractor,
+  type BudgetAllocation,
+  type BudgetedFile,
+  type ExtractedContent,
+} from './context-budget.js';

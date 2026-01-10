@@ -2,9 +2,16 @@
  * Execution Department
  *
  * i[13] contribution: The department that actually DOES the work.
+ * i[16] enhancement: Context Budget Manager integration
  *
  * After 12 passes refining Preparation, this closes the loop.
  * The Forge can now prepare AND execute tasks.
+ *
+ * i[16] addition: Now uses intelligent context budget management instead of
+ * dumb 3000-char truncation. Files are processed with:
+ * - Token budget allocation by priority
+ * - Signature extraction for large files
+ * - Smart truncation preserving structural boundaries
  *
  * Structure:
  * - ExecutionForeman (Sonnet-tier): Orchestrates execution, manages workers
@@ -19,6 +26,7 @@
 import { ContextPackage, ExecutionFeedback } from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
+import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
 import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -65,6 +73,7 @@ interface CodeGenerationResult {
 class CodeGenerationWorker {
   private client: Anthropic | null = null;
   private model: string = 'claude-sonnet-4-20250514';
+  private lastBudgetResult: Awaited<ReturnType<typeof processFilesWithBudget>> | null = null;
 
   constructor() {
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -78,6 +87,9 @@ class CodeGenerationWorker {
 
   /**
    * Generate code from ContextPackage
+   *
+   * i[16] enhancement: Now uses Context Budget Manager for intelligent
+   * file content extraction instead of dumb truncation.
    *
    * Reads mustRead files, constructs prompt, calls LLM
    */
@@ -94,20 +106,57 @@ class CodeGenerationWorker {
       };
     }
 
-    // Read mustRead files for context
-    const fileContents: Array<{ path: string; content: string }> = [];
-    for (const file of pkg.codeContext.mustRead) {
-      try {
-        const content = await fs.readFile(file.path, 'utf-8');
+    // i[16]: Use Context Budget Manager for intelligent file content extraction
+    // Budget: 40k tokens for file contents (leaving room for prompt structure)
+    console.log('[Worker:CodeGeneration] Processing files with context budget...');
+
+    const filesToProcess: Array<{ path: string; reason: string; priority: 'high' | 'medium' | 'low' }> = [];
+
+    // Add mustRead as high priority
+    for (const f of pkg.codeContext.mustRead) {
+      filesToProcess.push({
+        path: f.path,
+        reason: f.reason,
+        priority: 'high',
+      });
+    }
+
+    // Add related examples as medium priority
+    for (const example of pkg.codeContext.relatedExamples.slice(0, 5)) {
+      filesToProcess.push({
+        path: example.path,
+        reason: example.similarity,
+        priority: 'medium',
+      });
+    }
+
+    const budgetResult = await processFilesWithBudget(filesToProcess, 40000);
+
+    // Report budget usage
+    console.log(`[Worker:CodeGeneration] Context Budget Summary:`);
+    console.log(`  Total files: ${budgetResult.summary.totalFiles}`);
+    console.log(`  Full content: ${budgetResult.summary.includedFull}`);
+    console.log(`  Signatures only: ${budgetResult.summary.includedSignatures}`);
+    console.log(`  Truncated: ${budgetResult.summary.includedTruncated}`);
+    console.log(`  Excluded: ${budgetResult.summary.excluded}`);
+    console.log(`  Tokens used: ${budgetResult.summary.totalTokensUsed}`);
+    console.log(`  Budget remaining: ${budgetResult.summary.budgetRemaining}`);
+
+    // Convert budgeted files to the format expected by buildPrompt
+    const fileContents: Array<{ path: string; content: string; method?: string }> = [];
+    for (const file of budgetResult.files) {
+      if (file.content) {
         fileContents.push({
           path: file.path,
-          content: this.truncateContent(content, 3000), // Limit per-file
+          content: file.content,
+          method: file.extractionMethod,
         });
-        console.log(`[Worker:CodeGeneration] Read: ${file.path} (${content.length} chars)`);
-      } catch (error) {
-        console.warn(`[Worker:CodeGeneration] Could not read ${file.path}: ${error}`);
+        console.log(`[Worker:CodeGeneration] ${file.path}: ${file.extractionMethod} (${file.allocatedTokens} tokens)`);
       }
     }
+
+    // Store this last budget result for logging
+    this.lastBudgetResult = budgetResult;
 
     // Build the prompt
     const prompt = this.buildPrompt(pkg, fileContents, projectPath);
@@ -140,12 +189,16 @@ class CodeGenerationWorker {
 
   private buildPrompt(
     pkg: ContextPackage,
-    fileContents: Array<{ path: string; content: string }>,
+    fileContents: Array<{ path: string; content: string; method?: string }>,
     projectPath: string
   ): string {
-    const filesSection = fileContents.map(f =>
-      `### ${f.path}\n\`\`\`typescript\n${f.content}\n\`\`\``
-    ).join('\n\n');
+    // i[16]: Include extraction method info for transparency
+    const filesSection = fileContents.map(f => {
+      const methodNote = f.method && f.method !== 'full'
+        ? `\n<!-- Content extracted using: ${f.method} -->`
+        : '';
+      return `### ${f.path}${methodNote}\n\`\`\`typescript\n${f.content}\n\`\`\``;
+    }).join('\n\n');
 
     const patternsSection = `
 - Naming: ${pkg.patterns.namingConventions}
@@ -282,9 +335,13 @@ Generate the code now:`;
     return filePath;
   }
 
-  private truncateContent(content: string, maxChars: number): string {
-    if (content.length <= maxChars) return content;
-    return content.substring(0, maxChars) + '\n\n// ... truncated for brevity';
+  // i[16]: truncateContent removed - replaced by Context Budget Manager
+
+  /**
+   * Get the last budget result for reporting
+   */
+  getLastBudgetResult() {
+    return this.lastBudgetResult;
   }
 }
 
