@@ -311,15 +311,22 @@ interface ArchitectureAnalysisResult {
 
 /**
  * i[9] fix: Task-type-aware file discovery
+ * i[11] enhancement: Explicit reference extraction
  *
  * The original implementation searched file CONTENTS for ALL keywords,
  * which caused noise: "add a simple README" matched llm.ts because it
  * contains the word "simple".
  *
- * New approach (3 strategies, ordered by priority):
+ * New approach (4 strategies, ordered by priority):
+ * 0. Explicit reference extraction (i[11]) - files/types/classes explicitly mentioned
  * 1. Task-type specific files (README task → .md files, docs/, package.json)
  * 2. Path-based matching (file NAMES contain keywords)
  * 3. Content matching with filtered keywords (skip "code noise" words)
+ *
+ * i[11] insight: When a task says "follow the pattern in preparation.ts",
+ * that's an EXPLICIT reference that must be in mustRead. Keyword matching
+ * doesn't catch this - we need to extract file paths, type names, and
+ * class names from the task description and resolve them to actual files.
  */
 class FileDiscoveryWorker {
   // Words that appear commonly in code but aren't meaningful for file discovery
@@ -336,6 +343,7 @@ class FileDiscoveryWorker {
    * Discover relevant files for a task in a codebase
    *
    * i[9] refactored: Now uses multi-strategy approach
+   * i[11] enhanced: Added explicit reference extraction as Strategy 0
    */
   async discover(
     projectPath: string,
@@ -359,6 +367,16 @@ class FileDiscoveryWorker {
     }
 
     const relevantFiles: FileDiscoveryResult['relevantFiles'] = [];
+
+    // Strategy 0 (i[11]): Explicit reference extraction (HIGHEST priority)
+    // Extract file paths, type names, and class names directly mentioned in task
+    console.log('[Worker:FileDiscovery] Strategy 0: Explicit reference extraction (i[11])');
+    const explicitRefs = await this.discoverByExplicitReferences(projectPath, taskDescription);
+    for (const file of explicitRefs) {
+      if (!relevantFiles.find(f => f.path === file.path)) {
+        relevantFiles.push({ ...file, priority: 'high' });
+      }
+    }
 
     // Strategy 1: Task-type specific files (highest priority)
     console.log('[Worker:FileDiscovery] Strategy 1: Task-type specific files');
@@ -399,8 +417,186 @@ class FileDiscoveryWorker {
       console.log('[Worker:FileDiscovery] Strategy 3: Skipped (all keywords are code noise)');
     }
 
-    console.log(`[Worker:FileDiscovery] Found ${relevantFiles.length} relevant files`);
-    return { relevantFiles, directoryStructure };
+    // i[11] fix: Filter out directories and non-code files from mustRead
+    // The path-based matching often adds directories and irrelevant files
+    const filteredFiles = await this.filterRelevantFiles(relevantFiles, projectPath);
+
+    console.log(`[Worker:FileDiscovery] Found ${filteredFiles.length} relevant files (after filtering)`);
+    return { relevantFiles: filteredFiles, directoryStructure };
+  }
+
+  /**
+   * i[11] addition: Filter out directories and non-relevant files from results.
+   *
+   * The path-based matching strategy often includes:
+   * - Directories (not files)
+   * - dist/ compiled output
+   * - Non-code files like Dockerfile when task is about TypeScript
+   *
+   * This filter ensures mustRead contains actual readable code files.
+   */
+  private async filterRelevantFiles(
+    files: FileDiscoveryResult['relevantFiles'],
+    projectPath: string
+  ): Promise<FileDiscoveryResult['relevantFiles']> {
+    const filtered: FileDiscoveryResult['relevantFiles'] = [];
+
+    for (const file of files) {
+      // Skip if it's a directory
+      try {
+        const stats = await fs.stat(file.path);
+        if (stats.isDirectory()) {
+          console.log(`[Worker:FileDiscovery] Filtering out directory: ${file.path}`);
+          continue;
+        }
+      } catch {
+        // File doesn't exist, skip it
+        continue;
+      }
+
+      // Skip dist/ compiled output
+      if (file.path.includes('/dist/')) {
+        console.log(`[Worker:FileDiscovery] Filtering out dist file: ${file.path}`);
+        continue;
+      }
+
+      // Skip non-code files for code tasks (unless explicitly referenced)
+      const isExplicitReference = file.reason.includes('Explicitly referenced') ||
+        file.reason.includes('Defines type/class') ||
+        file.reason.includes('Defines function');
+
+      if (!isExplicitReference) {
+        // Check if it's a code file
+        const codeExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.md'];
+        const hasCodeExtension = codeExtensions.some(ext => file.path.endsWith(ext));
+
+        // Skip Dockerfile and similar unless explicitly mentioned
+        const basename = path.basename(file.path);
+        const nonCodeFiles = ['Dockerfile', '.gitignore', '.env', '.env.example'];
+        if (nonCodeFiles.includes(basename)) {
+          console.log(`[Worker:FileDiscovery] Filtering out non-code file: ${file.path}`);
+          continue;
+        }
+
+        if (!hasCodeExtension) {
+          console.log(`[Worker:FileDiscovery] Filtering out non-code extension: ${file.path}`);
+          continue;
+        }
+      }
+
+      filtered.push(file);
+    }
+
+    return filtered;
+  }
+
+  /**
+   * Strategy 0 (i[11]): Discover files by explicit references in task description
+   *
+   * This strategy extracts:
+   * 1. File paths mentioned directly (e.g., "preparation.ts", "src/index.ts")
+   * 2. Type/interface names (e.g., "ContextPackage") → resolve to definition file
+   * 3. Class names (e.g., "PreparationForeman") → resolve to definition file
+   *
+   * This solves the problem where a task says "follow the pattern in preparation.ts"
+   * but keyword matching doesn't find preparation.ts because "preparation" isn't
+   * a keyword in the stopword-filtered list.
+   */
+  private async discoverByExplicitReferences(
+    projectPath: string,
+    taskDescription: string
+  ): Promise<Array<{ path: string; reason: string }>> {
+    const files: Array<{ path: string; reason: string }> = [];
+
+    if (!taskDescription) return files;
+
+    // 1. Extract explicit file paths (.ts, .tsx, .js, .jsx, .md, .json, .yaml, .yml)
+    // Match patterns like "preparation.ts", "src/departments/execution.ts", etc.
+    const filePatterns = taskDescription.match(
+      /(?:^|[\s"'`(,])([a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|md|json|yaml|yml))(?:[\s"'`),]|$)/gi
+    ) || [];
+
+    for (const match of filePatterns) {
+      // Clean up the match (remove surrounding whitespace/punctuation)
+      const fileName = match.replace(/^[\s"'`(,]+|[\s"'`),]+$/g, '');
+      if (fileName.length < 3) continue;
+
+      // Try to find this file in the project
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -type f -name "${path.basename(fileName)}" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -3`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          // Prefer paths that match the full specified path, not just basename
+          if (fileName.includes('/') && !foundPath.includes(fileName.replace(/^\//, ''))) {
+            continue;
+          }
+          files.push({
+            path: foundPath,
+            reason: `Explicitly referenced in task: "${fileName}"`,
+          });
+        }
+      } catch { /* ignore */ }
+    }
+
+    // 2. Extract PascalCase type/class names (likely TypeScript types or classes)
+    // Match patterns like "ContextPackage", "PreparationForeman", etc.
+    const pascalCaseNames = taskDescription.match(/\b([A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+)\b/g) || [];
+
+    // Deduplicate and filter out common false positives
+    const falsePascalCase = new Set(['README', 'TODO', 'FIXME', 'JSON', 'API', 'URL', 'HTML', 'CSS', 'SQL', 'HTTP', 'HTTPS']);
+    const uniqueNames = [...new Set(pascalCaseNames)].filter(n => !falsePascalCase.has(n));
+
+    for (const name of uniqueNames) {
+      // Search for files that define this type/class
+      // Look for various definition patterns:
+      // - "interface Name", "type Name =", "class Name"
+      // - "export const Name", "export type Name", "export class Name"
+      // - "export { Name }", etc.
+      try {
+        const { stdout } = await execAsync(
+          `rg -l "(interface|type|class|const|let|var|function)\\s+${name}\\b|export\\s+.*${name}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -3`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === foundPath)) {
+            files.push({
+              path: foundPath,
+              reason: `Defines type/class "${name}" referenced in task`,
+            });
+          }
+        }
+      } catch { /* ignore - rg might not find anything */ }
+    }
+
+    // 3. Extract camelCase identifiers that might be important function/method names
+    // Match patterns like "createForgeEngine", "prepareContext", etc.
+    // Only include if they're likely to be definitions (not common verbs)
+    const camelCasePatterns = taskDescription.match(/\b(create|build|make|get|set|init|handle|process)[A-Z][a-zA-Z0-9]+\b/g) || [];
+
+    for (const name of [...new Set(camelCasePatterns)]) {
+      try {
+        const { stdout } = await execAsync(
+          `rg -l "(?:function|const|let|export)\\s+${name}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -2`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === foundPath)) {
+            files.push({
+              path: foundPath,
+              reason: `Defines function "${name}" referenced in task`,
+            });
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    console.log(`[Worker:FileDiscovery] Strategy 0: Found ${files.length} explicit references`);
+    return files;
   }
 
   /**
