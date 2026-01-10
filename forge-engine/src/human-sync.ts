@@ -169,12 +169,11 @@ export const conflictingConstraintsTrigger: HumanSyncTrigger = {
     }
 
     // Check for conflicting scope
-    const inScope = pkg.task.scope.inScope.join(' ').toLowerCase();
-    const outOfScope = pkg.task.scope.outOfScope.join(' ').toLowerCase();
+    // i[38]: Changed from substring to EXACT match only
+    // Previous: "refactor" matched "major refactoring" via substring - false positive
     const scopeOverlap = pkg.task.scope.inScope.some(i =>
       pkg.task.scope.outOfScope.some(o =>
-        i.toLowerCase().includes(o.toLowerCase()) ||
-        o.toLowerCase().includes(i.toLowerCase())
+        i.toLowerCase().trim() === o.toLowerCase().trim()
       )
     );
     if (scopeOverlap) {
@@ -325,21 +324,36 @@ export const ambiguousTargetTrigger: HumanSyncTrigger = {
     
     // i[34]: Detect if this is an ADD task (creating something new)
     // Pattern: starts with "add" or contains "add a/an/and" before the type mention
-    const isAddTask = /^add\b/i.test(request.trim()) || 
+    const isAddTask = /^add\b/i.test(request.trim()) ||
                       /\badd\s+(a|an|and\s+export)\s+/i.test(request);
-    const isCreateTask = /^create\b/i.test(request.trim()) || 
+    const isCreateTask = /^create\b/i.test(request.trim()) ||
                          /\bcreate\s+(a|an)\s+/i.test(request);
     const isNewThingTask = isAddTask || isCreateTask;
-    
+
+    // i[38]: Detect REFACTOR tasks - function names won't match file paths
+    const isRefactorTask = pkg.projectType === 'refactor' ||
+                           /\b(rename|refactor|extract|move)\b/i.test(request);
+
+    // i[38]: Check if an explicit file path is mentioned and is in mustRead
+    // Pattern: "in src/types.ts" or "from src/state.ts"
+    const explicitFileMatch = /\b(?:in|from|to|at)\s+(src\/[\w\-./]+\.\w+)/i.exec(request);
+    const hasExplicitFileInMustRead = explicitFileMatch && pkg.codeContext.mustRead.some(f => {
+      const normalizedPath = f.path.replace(/^.*\//, '').toLowerCase();
+      const targetFile = explicitFileMatch[1].split('/').pop()?.toLowerCase();
+      return normalizedPath === targetFile || f.path.toLowerCase().includes(explicitFileMatch[1].toLowerCase());
+    });
+
     const mentionsSpecific = /\b(file|function|class|method|component)\s+(\w+)/i.exec(request);
     if (mentionsSpecific) {
       const mentionedName = mentionsSpecific[2].toLowerCase();
       // Skip common verbs/words that aren't actual names
-      const commonWords = ['called', 'named', 'defined', 'that', 'which', 'the', 'a', 'an', 'to', 'for', 'with', 'from', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'can', 'could', 'like', 'new', 'add', 'create', 'simple', 'basic', 'helper', 'utility'];
+      // i[38]: Added 'working', 'exactly', 'before' to prevent false positives
+      const commonWords = ['called', 'named', 'defined', 'that', 'which', 'the', 'a', 'an', 'to', 'for', 'with', 'from', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'can', 'could', 'like', 'new', 'add', 'create', 'simple', 'basic', 'helper', 'utility', 'working', 'exactly', 'before'];
       if (!commonWords.includes(mentionedName)) {
         // i[34]: For ADD/CREATE tasks, the target WON'T exist in codeContext - that's expected!
+        // i[38]: For REFACTOR tasks with explicit file paths, the FUNCTION name won't be in the PATH - that's expected!
         // Only fire the "not found" warning for MODIFY/FIX tasks where target should exist
-        if (!isNewThingTask) {
+        if (!isNewThingTask && !(isRefactorTask && hasExplicitFileInMustRead)) {
           const foundInMustRead = pkg.codeContext.mustRead.some(f =>
             f.path.toLowerCase().includes(mentionedName)
           );

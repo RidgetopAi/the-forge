@@ -411,8 +411,30 @@ class CodeGenerationWorker {
 - File Organization: ${pkg.patterns.fileOrganization}
 - Error Handling: ${pkg.patterns.errorHandling}`;
 
-    return `You are a code generation assistant for The Forge Development Cognition System.
+    // i[38]: Refactor-aware prompting - fixes 0% refactor pass rate
+    const isRefactor = pkg.projectType === 'refactor';
+    const refactorGuidance = isRefactor ? `
+## TASK TYPE: REFACTOR
 
+This is a REFACTOR task. You MUST:
+1. **Behavior stays the same** - do not change what the code does
+2. **No duplicate logic** - when renaming, OLD NAME MUST BE REMOVED
+3. **Update ALL usages** - imports, exports, call sites, everywhere
+4. **Use 'edit' actions** with search/replace pairs
+
+### FOR RENAMES:
+- Find the old declaration and REPLACE it with the new name
+- Find ALL call sites and update them
+- The old name should NOT exist in the codebase after your changes
+
+### FOR EXTRACTS:
+- Add the new export
+- Keep behavior intact
+- Update any internal references
+` : '';
+
+    return `You are a code generation assistant for The Forge Development Cognition System.
+${refactorGuidance}
 ## TASK
 ${pkg.task.description}
 
