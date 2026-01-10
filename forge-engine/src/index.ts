@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[21]: Updated instance ID - adds --insights command for pattern analysis
-  const engine = new ForgeEngine('i[21]');
+  // i[22]: Updated instance ID - adds Anthropic tool_use for reliable code generation
+  const engine = new ForgeEngine('i[22]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

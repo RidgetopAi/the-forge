@@ -4,6 +4,7 @@
  * i[13] contribution: The department that actually DOES the work.
  * i[16] enhancement: Context Budget Manager integration
  * i[18] enhancement: Tool Building integration for task-specific validation
+ * i[22] enhancement: Anthropic tool_use for reliable structured output
  *
  * After 12 passes refining Preparation, this closes the loop.
  * The Forge can now prepare AND execute tasks.
@@ -17,6 +18,11 @@
  * i[18] addition: Tool Building - generates and runs task-specific validation
  * tools. This solves Hard Problem #5 and closes the feedback loop properly.
  * Instead of just "does it compile", we can now ask "does it work".
+ *
+ * i[22] addition: Anthropic tool_use for code generation. REVIEW-003 identified
+ * 67% "unknown_failure" and InsightGenerator recommended tool_use. Instead of
+ * fragile JSON parsing from text, we now use tool_use which guarantees valid
+ * structured output. The LLM must conform to the schema - no parsing needed.
  *
  * Structure:
  * - ExecutionForeman (Sonnet-tier): Orchestrates execution, manages workers
@@ -74,6 +80,58 @@ interface CodeGenerationResult {
 }
 
 // ============================================================================
+// i[22]: Tool Definition for Anthropic tool_use
+// ============================================================================
+
+/**
+ * Tool definition for code generation output.
+ *
+ * i[22] contribution: Instead of asking the LLM to output JSON in text
+ * (which requires fragile parsing), we define this as a tool that the
+ * LLM calls with structured arguments. This guarantees valid output.
+ *
+ * The LLM is forced to call this tool, and Anthropic's API ensures the
+ * arguments conform to the schema.
+ */
+const CODE_GENERATION_TOOL: Anthropic.Tool = {
+  name: 'submit_code_changes',
+  description: 'Submit the generated code changes for the task. Call this tool with all files that need to be created or modified.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      files: {
+        type: 'array',
+        description: 'Array of files to create or modify',
+        items: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Absolute path to the file',
+            },
+            action: {
+              type: 'string',
+              enum: ['create', 'modify'],
+              description: 'Whether to create a new file or modify an existing one',
+            },
+            content: {
+              type: 'string',
+              description: 'The complete file content',
+            },
+          },
+          required: ['path', 'action', 'content'],
+        },
+      },
+      explanation: {
+        type: 'string',
+        description: 'Brief explanation of what was generated and why',
+      },
+    },
+    required: ['files', 'explanation'],
+  },
+};
+
+// ============================================================================
 // Workers
 // ============================================================================
 
@@ -82,6 +140,8 @@ interface CodeGenerationResult {
  *
  * Uses LLM to generate code based on ContextPackage.
  * This is where preparation meets execution.
+ *
+ * i[22] enhancement: Now uses Anthropic tool_use for guaranteed structured output.
  */
 class CodeGenerationWorker {
   private client: Anthropic | null = null;
@@ -104,7 +164,11 @@ class CodeGenerationWorker {
    * i[16] enhancement: Now uses Context Budget Manager for intelligent
    * file content extraction instead of dumb truncation.
    *
-   * Reads mustRead files, constructs prompt, calls LLM
+   * i[22] enhancement: Now uses Anthropic tool_use for guaranteed structured
+   * output. Instead of fragile JSON parsing from text, the LLM calls a tool
+   * with structured arguments. This eliminates JSON parsing failures.
+   *
+   * Reads mustRead files, constructs prompt, calls LLM with tool_use
    */
   async generate(
     pkg: ContextPackage,
@@ -171,23 +235,59 @@ class CodeGenerationWorker {
     // Store this last budget result for logging
     this.lastBudgetResult = budgetResult;
 
-    // Build the prompt
-    const prompt = this.buildPrompt(pkg, fileContents, projectPath);
+    // Build the prompt (now without JSON output instructions)
+    const prompt = this.buildPromptForToolUse(pkg, fileContents, projectPath);
 
     try {
-      console.log('[Worker:CodeGeneration] Calling LLM for code generation...');
+      console.log('[Worker:CodeGeneration] Calling LLM with tool_use (i[22])...');
 
+      // i[22]: Use tool_use with tool_choice: 'any' to force structured output
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 8000,
+        tools: [CODE_GENERATION_TOOL],
+        tool_choice: { type: 'any' }, // Force the model to use a tool
         messages: [{ role: 'user', content: prompt }],
       });
 
-      const text = response.content[0].type === 'text'
-        ? response.content[0].text
-        : '';
+      // Extract tool use from response
+      const toolUse = response.content.find(
+        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
+      );
 
-      return this.parseResponse(text, projectPath);
+      if (!toolUse || toolUse.name !== 'submit_code_changes') {
+        // Fallback: try legacy text parsing if no tool use found
+        console.warn('[Worker:CodeGeneration] No tool_use in response, trying legacy parsing...');
+        const textBlock = response.content.find(
+          (block): block is Anthropic.TextBlock => block.type === 'text'
+        );
+        if (textBlock) {
+          return this.parseResponse(textBlock.text, projectPath);
+        }
+        return {
+          success: false,
+          files: [],
+          explanation: 'LLM did not call the submit_code_changes tool',
+          error: 'NO_TOOL_USE_IN_RESPONSE',
+        };
+      }
+
+      // i[22]: The input is already validated by Anthropic's API!
+      // No JSON parsing needed - just validate and normalize
+      const input = toolUse.input as {
+        files?: Array<{ path: string; action: string; content: string }>;
+        explanation?: string;
+      };
+
+      console.log(`[Worker:CodeGeneration] Tool use received: ${input.files?.length ?? 0} file(s)`);
+
+      return this.validateAndNormalizeParsed(
+        {
+          files: input.files ?? [],
+          explanation: input.explanation ?? 'Code generated via tool_use',
+        },
+        projectPath
+      );
 
     } catch (error) {
       console.error('[Worker:CodeGeneration] LLM call failed:', error);
@@ -198,6 +298,80 @@ class CodeGenerationWorker {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  }
+
+  /**
+   * Build prompt for tool_use (i[22])
+   *
+   * Similar to buildPrompt but without JSON output instructions.
+   * The output format is now handled by the tool definition.
+   */
+  private buildPromptForToolUse(
+    pkg: ContextPackage,
+    fileContents: Array<{ path: string; content: string; method?: string }>,
+    projectPath: string
+  ): string {
+    // i[16]: Include extraction method info for transparency
+    const filesSection = fileContents.map(f => {
+      const methodNote = f.method && f.method !== 'full'
+        ? `\n<!-- Content extracted using: ${f.method} -->`
+        : '';
+      return `### ${f.path}${methodNote}\n\`\`\`typescript\n${f.content}\n\`\`\``;
+    }).join('\n\n');
+
+    const patternsSection = `
+- Naming: ${pkg.patterns.namingConventions}
+- File Organization: ${pkg.patterns.fileOrganization}
+- Error Handling: ${pkg.patterns.errorHandling}`;
+
+    return `You are a code generation assistant for The Forge Development Cognition System.
+
+## TASK
+${pkg.task.description}
+
+## ACCEPTANCE CRITERIA
+${pkg.task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+## PROJECT CONTEXT
+Project Path: ${projectPath}
+Project Type: ${pkg.projectType}
+
+### Architecture Overview
+${pkg.architecture.overview}
+
+### Relevant Components
+${pkg.architecture.relevantComponents.map(c =>
+  `- ${c.name}: ${c.purpose} (${c.location})`
+).join('\n')}
+
+## CODE CONTEXT (Files to Reference)
+${filesSection}
+
+## PATTERNS TO FOLLOW
+${patternsSection}
+
+## CONSTRAINTS
+Technical:
+${pkg.constraints.technical.map(c => `- ${c}`).join('\n') || '- None specified'}
+
+Quality:
+${pkg.constraints.quality.map(c => `- ${c}`).join('\n') || '- None specified'}
+
+## INSTRUCTIONS
+1. Analyze the task and existing code patterns
+2. Generate the code that fulfills the task
+3. Follow existing patterns from the reference files
+4. Use the submit_code_changes tool to provide your code
+
+IMPORTANT:
+- Use ABSOLUTE paths based on the project path: ${projectPath}
+- For new files, use "create" action
+- For modifications to existing files, use "modify" action with full file content
+- Follow TypeScript conventions
+- Include necessary imports
+- Generate complete, working code
+
+Generate the code now by calling the submit_code_changes tool:`;
   }
 
   private buildPrompt(
