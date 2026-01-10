@@ -913,6 +913,18 @@ async function main() {
     return;
   }
 
+  // i[30]: Handle --benchmark command for external benchmarks
+  if (args.includes('--benchmark')) {
+    const dryRun = args.includes('--dry-run');
+    const taskIndex = args.indexOf('--task');
+    const specificTask = taskIndex !== -1 ? args[taskIndex + 1] : undefined;
+    
+    console.log('[ForgeEngine] Launching external benchmark...');
+    console.log('Run: npx tsx src/benchmark.ts' + (dryRun ? ' --dry-run' : '') + (specificTask ? ` --task ${specificTask}` : ''));
+    console.log('\nSee benchmark.ts for full benchmark suite.');
+    return;
+  }
+
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
   const shouldExecute = executeIndex !== -1;
@@ -928,6 +940,7 @@ async function main() {
     console.log('       npx tsx src/index.ts --self-improve <project-path> [--dry-run] [--max-tasks N]');
     console.log('       npx tsx src/index.ts --traces');
     console.log('       npx tsx src/index.ts --replay <task-id>');
+    console.log('       npx tsx src/benchmark.ts [--dry-run] [--task N]');
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
@@ -937,6 +950,7 @@ async function main() {
     console.log('  --self-improve <path>        Run self-improvement cycle (i[28])');
     console.log('  --traces                     List recent execution traces (i[29])');
     console.log('  --replay <task-id>           Debug a failed execution (i[29])');
+    console.log('  benchmark.ts                 External benchmark suite (i[30])');
     console.log('');
     console.log('Options:');
     console.log('  --execute     Actually execute the task (default: prepare only)');
@@ -961,8 +975,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[29]: Observability first
-  const engine = new ForgeEngine('i[29]');
+  // i[30]: External benchmark (ground truth)
+  const engine = new ForgeEngine('i[30]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -971,8 +985,13 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-// Run if called directly
-main().catch(console.error);
+// Run if called directly (ES module check via import.meta.url)
+// Only run main() when this file is the entry point, not when imported
+const isMainModule = import.meta.url === `file://${process.argv[1]}` || 
+                     import.meta.url.endsWith('/index.ts') && process.argv[1]?.endsWith('index.ts');
+if (isMainModule) {
+  main().catch(console.error);
+}
 
 // Export for programmatic use
 export { taskManager, mandrel };
