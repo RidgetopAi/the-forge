@@ -21,6 +21,9 @@ import { mandrel } from './mandrel.js';
 // Types
 // ============================================================================
 
+/**
+ * i[26] enhancement: Added structuredFailure for proper failure analytics
+ */
 export interface ExecutionFeedbackData {
   taskId: string;
   contextPackageId: string;
@@ -49,6 +52,13 @@ export interface ExecutionFeedbackData {
     content: string;
     tags: string[];
   }>;
+  // i[26]: Structured failure for analytics
+  structuredFailure?: {
+    phase: string;
+    code: string;
+    message: string;
+    suggestedFix?: string;
+  };
 }
 
 export interface InsightSummary {
@@ -205,6 +215,8 @@ export class InsightGenerator {
    * "Execution feedback for taskId:\n{JSON object}"
    * or
    * "ExecutionFeedback for task taskId:\n...\nFull feedback:\n{JSON object}"
+   *
+   * i[26]: Now also extracts structuredFailure from learnings for analytics.
    */
   private parseExecutionFeedback(content: string): ExecutionFeedbackData | null {
     try {
@@ -216,6 +228,30 @@ export class InsightGenerator {
 
       // Validate required fields
       if (!data.outcome || !data.accuracy) return null;
+
+      const learnings = data.learnings || [];
+
+      // i[26]: Extract structured failure from learnings if present
+      let structuredFailure: ExecutionFeedbackData['structuredFailure'];
+      const failureLearning = learnings.find(
+        (l: { content: string; tags: string[] }) =>
+          l.content.startsWith('Structured failure:')
+      );
+
+      if (failureLearning) {
+        // Parse: "Structured failure: phase=X, code=Y, message=Z"
+        const phaseMatch = failureLearning.content.match(/phase=([^,]+)/);
+        const codeMatch = failureLearning.content.match(/code=([^,]+)/);
+        const messageMatch = failureLearning.content.match(/message=(.+)$/);
+
+        if (phaseMatch && codeMatch) {
+          structuredFailure = {
+            phase: phaseMatch[1],
+            code: codeMatch[1],
+            message: messageMatch ? messageMatch[1] : 'Unknown',
+          };
+        }
+      }
 
       return {
         taskId: data.taskId || 'unknown',
@@ -240,7 +276,8 @@ export class InsightGenerator {
           patternsFollowed: data.accuracy.patternsFollowed || [],
           patternsViolated: data.accuracy.patternsViolated || [],
         },
-        learnings: data.learnings || [],
+        learnings,
+        structuredFailure, // i[26]
       };
     } catch {
       return null;
@@ -305,48 +342,77 @@ export class InsightGenerator {
    * i[21] enhancement: Better categorization using structured error messages
    * from execution.ts. Previously 67% of failures were "unknown_failure"
    * because error details weren't being captured.
+   *
+   * i[26] enhancement: Now uses structuredFailure data when available.
+   * This provides exact phase and code from the failure taxonomy,
+   * eliminating text-parsing guesswork.
    */
   private identifyFailureModes(data: ExecutionFeedbackData[]): InsightSummary['failureModes'] {
     const failures = data.filter(d => !d.outcome.success);
     if (failures.length === 0) return [];
 
-    const modes: Record<string, { count: number; examples: string[] }> = {};
+    const modes: Record<string, { count: number; examples: string[]; phase?: string }> = {};
 
     for (const f of failures) {
-      // Categorize by failure type
       let mode: string;
+      let phase: string | undefined;
 
-      if (!f.outcome.compilationPassed) {
-        mode = 'compilation_failure';
-      } else if (f.outcome.testsRan && !f.outcome.testsPassed) {
-        mode = 'test_failure';
+      // i[26]: Use structured failure if available (preferred)
+      if (f.structuredFailure) {
+        mode = f.structuredFailure.code;
+        phase = f.structuredFailure.phase;
       } else {
-        // i[21]: Check learnings for structured error hints
-        // New format: "Task had issues: TypeScript error: TS2345..."
-        // or "Task had issues: Validation failed: tool1, tool2"
-        const learningContent = f.learnings.map(l => l.content.toLowerCase()).join(' ');
+        // Fallback: Check learnings for structured failure tags (i[26] format)
+        const structuredLearning = f.learnings.find(l =>
+          l.tags.some(t => t.startsWith('failure-code-'))
+        );
 
-        if (learningContent.includes('typescript error') || learningContent.includes('error ts')) {
-          mode = 'type_error';
-        } else if (learningContent.includes('validation failed')) {
-          mode = 'validation_failure';
-        } else if (learningContent.includes('code generation failed')) {
-          mode = 'code_generation_failure';
-        } else if (learningContent.includes('file operation failed')) {
-          mode = 'file_operation_failure';
-        } else if (learningContent.includes('compilation failed')) {
+        if (structuredLearning) {
+          const codeTag = structuredLearning.tags.find(t => t.startsWith('failure-code-'));
+          const phaseTag = structuredLearning.tags.find(t => t.startsWith('failure-phase-'));
+          mode = codeTag ? codeTag.replace('failure-code-', '') : 'unknown_failure';
+          phase = phaseTag ? phaseTag.replace('failure-phase-', '') : undefined;
+        } else if (!f.outcome.compilationPassed) {
+          // Legacy fallback: infer from outcome
           mode = 'compilation_failure';
-        } else if (learningContent.includes('json') || learningContent.includes('parse')) {
-          mode = 'json_parsing_error';
-        } else if (learningContent.includes('timeout')) {
-          mode = 'timeout';
+          phase = 'compilation';
+        } else if (f.outcome.testsRan && !f.outcome.testsPassed) {
+          mode = 'test_failure';
+          phase = 'validation';
         } else {
-          mode = 'unknown_failure';
+          // Legacy: Check learnings for text hints
+          const learningContent = f.learnings.map(l => l.content.toLowerCase()).join(' ');
+
+          if (learningContent.includes('typescript error') || learningContent.includes('error ts')) {
+            mode = 'compile_type_error';
+            phase = 'compilation';
+          } else if (learningContent.includes('validation failed')) {
+            mode = 'validation_test_failed';
+            phase = 'validation';
+          } else if (learningContent.includes('code generation failed')) {
+            mode = 'codegen_no_output';
+            phase = 'code_generation';
+          } else if (learningContent.includes('file operation failed')) {
+            mode = 'file_write_error';
+            phase = 'file_operation';
+          } else if (learningContent.includes('search string not found')) {
+            mode = 'file_edit_no_match';
+            phase = 'file_operation';
+          } else if (learningContent.includes('json') || learningContent.includes('parse')) {
+            mode = 'codegen_invalid_format';
+            phase = 'code_generation';
+          } else if (learningContent.includes('timeout')) {
+            mode = 'infra_timeout';
+            phase = 'infrastructure';
+          } else {
+            mode = 'infra_unknown';
+            phase = 'infrastructure';
+          }
         }
       }
 
       if (!modes[mode]) {
-        modes[mode] = { count: 0, examples: [] };
+        modes[mode] = { count: 0, examples: [], phase };
       }
       modes[mode].count++;
       if (modes[mode].examples.length < 3) {
@@ -357,8 +423,8 @@ export class InsightGenerator {
     // Convert to array and calculate percentages
     const totalFailures = failures.length;
     return Object.entries(modes)
-      .map(([mode, { count, examples }]) => ({
-        mode,
+      .map(([mode, { count, examples, phase }]) => ({
+        mode: phase ? `${phase}:${mode}` : mode,
         count,
         percentage: count / totalFailures,
         examples,

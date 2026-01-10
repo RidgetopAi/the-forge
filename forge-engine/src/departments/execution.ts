@@ -35,7 +35,14 @@
  * execution is almost mechanical." This department tests that hypothesis.
  */
 
-import { ContextPackage, ExecutionFeedback } from '../types.js';
+import {
+  ContextPackage,
+  ExecutionFeedback,
+  StructuredFailure,
+  ForgeRunResult,
+  classifyFailure,
+  type FailurePhase,
+} from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
 import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
@@ -66,6 +73,7 @@ interface ExecutionResult {
   validationSummary?: ValidationSummary; // i[18]: Detailed validation results
   notes: string;
   error?: string;
+  structuredFailure?: StructuredFailure; // i[26]: Structured failure for analytics
 }
 
 /**
@@ -1067,23 +1075,49 @@ export class ExecutionForeman {
       // Build result
       // i[21]: Determine specific failure reason for learning loop
       // Previously result.error was only set in catch blocks, causing 67% "unknown_failure"
+      // i[26]: Now creates StructuredFailure with phase + code for proper analytics
       let failureReason: string | undefined;
+      let structuredFailure: StructuredFailure | undefined;
+
       if (!codeResult.success) {
         failureReason = codeResult.error || 'Code generation failed';
+        structuredFailure = classifyFailure(
+          failureReason,
+          'code_generation' as FailurePhase,
+          codeResult.explanation
+        );
       } else if (fileResult.errors.length > 0) {
         failureReason = `File operation failed: ${fileResult.errors.map(e => e.error).join('; ')}`;
+        // Determine specific file operation failure type
+        const firstError = fileResult.errors[0]?.error || '';
+        structuredFailure = classifyFailure(
+          firstError,
+          'file_operation' as FailurePhase,
+          failureReason
+        );
       } else if (!validation.passed) {
         // Extract first meaningful error from compilation output
         const compileErrors = validation.output.match(/error TS\d+: [^\n]+/g);
         failureReason = compileErrors
           ? `TypeScript error: ${compileErrors[0]}`
           : `Compilation failed: ${validation.output.substring(0, 150)}`;
+        structuredFailure = classifyFailure(
+          failureReason,
+          'compilation' as FailurePhase,
+          validation.output
+        );
       } else if (!validationPassed && validationSummary) {
         const failed = validationSummary.results.filter(r => !r.passed);
         failureReason = `Validation failed: ${failed.map(f => f.toolName).join(', ')}`;
+        structuredFailure = classifyFailure(
+          failureReason,
+          'validation' as FailurePhase,
+          JSON.stringify(failed.map(f => ({ name: f.toolName, error: f.error })))
+        );
       }
 
       // i[24]: Include edited files in modified count for result
+      // i[26]: Include structuredFailure for analytics
       const result: ExecutionResult = {
         success: codeResult.success && fileResult.errors.length === 0 && validation.passed,
         filesCreated: fileResult.created,
@@ -1099,6 +1133,7 @@ export class ExecutionForeman {
           validationSummary ? `Tool validation: ${validationSummary.passed}/${validationSummary.totalTools} passed` : '',
         ].filter(Boolean).join('\n'),
         error: failureReason, // i[21]: Now captures specific failure reason
+        structuredFailure, // i[26]: Structured failure for analytics
       };
 
       // Set execution result on task
@@ -1117,7 +1152,11 @@ export class ExecutionForeman {
         taskManager.transitionState(taskId, 'blocked', this.instanceId, 'Execution had issues');
       }
 
-      // Store to Mandrel (i[18]: now includes validation results, i[24]: surgical edits)
+      // Store to Mandrel (i[18]: now includes validation results, i[24]: surgical edits, i[26]: structured failure)
+      const failureInfo = structuredFailure
+        ? `\nFailure Phase: ${structuredFailure.phase}\nFailure Code: ${structuredFailure.code}\nFailure Message: ${structuredFailure.message}${structuredFailure.suggestedFix ? `\nSuggested Fix: ${structuredFailure.suggestedFix}` : ''}`
+        : '';
+
       await mandrel.storeContext(
         `Execution complete for task ${taskId}:\n` +
         `Success: ${result.success}\n` +
@@ -1126,9 +1165,16 @@ export class ExecutionForeman {
         `Files Edited (surgical): ${fileResult.edited.join(', ') || 'none'}\n` +  // i[24]
         `Compilation: ${result.compilationPassed ? 'PASSED' : 'FAILED'}\n` +
         `Validation: ${result.validationPassed ? 'PASSED' : 'FAILED'}${validationSummary ? ` (${validationSummary.passed}/${validationSummary.totalTools} tools passed)` : ''}\n` +
-        `Notes: ${result.notes}`,
+        failureInfo +  // i[26]: Structured failure info
+        `\nNotes: ${result.notes}`,
         result.success ? 'completion' : 'error',
-        ['execution', result.success ? 'success' : 'failed', this.instanceId, fileResult.edited.length > 0 ? 'surgical-edit' : 'tool-building']
+        [
+          'execution',
+          result.success ? 'success' : 'failed',
+          this.instanceId,
+          fileResult.edited.length > 0 ? 'surgical-edit' : 'tool-building',
+          ...(structuredFailure ? [`failure-phase-${structuredFailure.phase}`, `failure-code-${structuredFailure.code}`] : [])
+        ]
       );
 
       console.log(`\n[Foreman:Execution] Complete: ${result.success ? 'SUCCESS' : 'ISSUES FOUND'}`);
@@ -1136,9 +1182,13 @@ export class ExecutionForeman {
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      const stack = error instanceof Error ? error.stack : undefined;
       console.error(`[Foreman:Execution] Error: ${message}`);
 
       taskManager.transitionState(taskId, 'failed', this.instanceId, message);
+
+      // i[26]: Classify infrastructure failure
+      const infraFailure = classifyFailure(message, 'infrastructure' as FailurePhase, stack);
 
       return {
         success: false,
@@ -1149,6 +1199,7 @@ export class ExecutionForeman {
         validationPassed: false, // i[18]
         notes: 'Execution failed with error',
         error: message,
+        structuredFailure: infraFailure, // i[26]
       };
     }
   }
@@ -1218,6 +1269,16 @@ export class ExecutionForeman {
           type: (testsPassed ? 'insight' : 'warning') as 'insight' | 'warning' | 'correction' | 'pattern',
           content: `Tool Building validation: ${result.validationSummary!.passed}/${result.validationSummary!.totalTools} tools passed.`,
           tags: ['tool-building', testsPassed ? 'validation-passed' : 'validation-failed'],
+        }] : []),
+        // i[26]: Add structured failure learning for analytics
+        ...(result.structuredFailure ? [{
+          type: 'correction' as 'insight' | 'warning' | 'correction' | 'pattern',
+          content: `Structured failure: phase=${result.structuredFailure.phase}, code=${result.structuredFailure.code}, message=${result.structuredFailure.message}`,
+          tags: [
+            'structured-failure',
+            `failure-phase-${result.structuredFailure.phase}`,
+            `failure-code-${result.structuredFailure.code}`,
+          ],
         }] : []),
       ],
     };

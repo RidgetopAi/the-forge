@@ -359,3 +359,182 @@ export const HistoricalContext = z.object({
   })),
 });
 export type HistoricalContext = z.infer<typeof HistoricalContext>;
+
+// ============================================================================
+// Failure Taxonomy (i[26] contribution - Root Cause Analysis Enhancement)
+// ============================================================================
+
+/**
+ * i[26]: Structured failure taxonomy to eliminate "unknown failure" category.
+ *
+ * The Problem: 57% of failures were "unknown_failure" because we used text
+ * parsing to categorize errors. This prevents learning from failures.
+ *
+ * The Solution: Explicit failure phases and codes. Every execution failure
+ * MUST be tagged with exactly one phase and one code. This enables:
+ * 1. Accurate failure mode analysis
+ * 2. Targeted improvements (fix the phase that fails most)
+ * 3. Trend tracking over time
+ */
+
+/**
+ * Execution phases - where in the pipeline did we fail?
+ */
+export const FailurePhase = z.enum([
+  'preparation',     // Context package assembly
+  'code_generation', // LLM generates code
+  'file_operation',  // Writing/editing files
+  'compilation',     // TypeScript/build check
+  'validation',      // Custom validation tools
+  'infrastructure',  // System errors, timeouts, API failures
+]);
+export type FailurePhase = z.infer<typeof FailurePhase>;
+
+/**
+ * Failure codes - specific, actionable failure reasons.
+ * Each code maps to a specific phase and has a clear remediation path.
+ */
+export const FailureCode = z.enum([
+  // Preparation failures
+  'prep_insufficient_context',
+  'prep_wrong_files',
+  'prep_missing_dependencies',
+
+  // Code generation failures
+  'codegen_no_output',
+  'codegen_invalid_format',
+  'codegen_tool_not_called',
+  'codegen_wrong_action',
+
+  // File operation failures
+  'file_not_found',
+  'file_write_error',
+  'file_edit_no_match',
+  'file_permission_error',
+
+  // Compilation failures
+  'compile_syntax_error',
+  'compile_type_error',
+  'compile_import_error',
+  'compile_module_not_found',
+
+  // Validation failures
+  'validation_test_failed',
+  'validation_not_run',
+  'validation_timeout',
+
+  // Infrastructure failures
+  'infra_api_error',
+  'infra_timeout',
+  'infra_network_error',
+  'infra_out_of_memory',
+  'infra_unknown',
+]);
+export type FailureCode = z.infer<typeof FailureCode>;
+
+/**
+ * Structured failure record.
+ * Every failed execution MUST produce one of these.
+ */
+export const StructuredFailure = z.object({
+  phase: FailurePhase,
+  code: FailureCode,
+  message: z.string(),
+  details: z.string().optional(),
+  recoverable: z.boolean(),
+  suggestedFix: z.string().optional(),
+});
+export type StructuredFailure = z.infer<typeof StructuredFailure>;
+
+/**
+ * Enhanced execution result with structured failure.
+ */
+export const ForgeRunResult = z.object({
+  runId: z.string().uuid(),
+  taskId: z.string().uuid(),
+  timestamp: z.date(),
+  executedBy: z.string(),
+  outcome: z.enum(['success', 'failure']),
+  failure: StructuredFailure.optional(),
+  timings: z.object({
+    totalMs: z.number(),
+    codeGenerationMs: z.number().optional(),
+    fileOperationMs: z.number().optional(),
+    compilationMs: z.number().optional(),
+    validationMs: z.number().optional(),
+  }).optional(),
+  filesCreated: z.array(z.string()),
+  filesModified: z.array(z.string()),
+  filesRead: z.array(z.string()),
+});
+export type ForgeRunResult = z.infer<typeof ForgeRunResult>;
+
+/**
+ * Helper to create a StructuredFailure from common error patterns.
+ */
+export function classifyFailure(
+  errorMessage: string,
+  phase: FailurePhase,
+  details?: string
+): StructuredFailure {
+  const msg = errorMessage.toLowerCase();
+
+  if (phase === 'compilation') {
+    if (msg.includes('cannot find module')) {
+      return { phase, code: 'compile_module_not_found', message: errorMessage, details, recoverable: true, suggestedFix: 'Ensure dependencies are installed' };
+    }
+    if (msg.includes('error ts2307')) {
+      return { phase, code: 'compile_import_error', message: errorMessage, details, recoverable: true, suggestedFix: 'Add missing import' };
+    }
+    if (msg.match(/error ts2\d{3}/)) {
+      return { phase, code: 'compile_type_error', message: errorMessage, details, recoverable: true, suggestedFix: 'Fix type mismatch' };
+    }
+    if (msg.includes('syntax error') || msg.includes('unexpected token')) {
+      return { phase, code: 'compile_syntax_error', message: errorMessage, details, recoverable: true, suggestedFix: 'Fix syntax error' };
+    }
+  }
+
+  if (phase === 'file_operation') {
+    if (msg.includes('not found') || msg.includes('no such file')) {
+      return { phase, code: 'file_not_found', message: errorMessage, details, recoverable: false, suggestedFix: 'Verify file path exists' };
+    }
+    if (msg.includes('search string not found')) {
+      return { phase, code: 'file_edit_no_match', message: errorMessage, details, recoverable: true, suggestedFix: 'Provide more context for exact text matching' };
+    }
+    if (msg.includes('permission denied') || msg.includes('eacces')) {
+      return { phase, code: 'file_permission_error', message: errorMessage, details, recoverable: false };
+    }
+  }
+
+  if (phase === 'code_generation') {
+    if (msg.includes('no tool') || msg.includes('did not call')) {
+      return { phase, code: 'codegen_tool_not_called', message: errorMessage, details, recoverable: true };
+    }
+    if (msg.includes('json') || msg.includes('parse')) {
+      return { phase, code: 'codegen_invalid_format', message: errorMessage, details, recoverable: true };
+    }
+  }
+
+  if (phase === 'validation') {
+    if (msg.includes('timeout')) {
+      return { phase, code: 'validation_timeout', message: errorMessage, details, recoverable: true };
+    }
+    if (msg.includes('failed')) {
+      return { phase, code: 'validation_test_failed', message: errorMessage, details, recoverable: true };
+    }
+  }
+
+  if (phase === 'infrastructure') {
+    if (msg.includes('timeout')) {
+      return { phase, code: 'infra_timeout', message: errorMessage, details, recoverable: true };
+    }
+    if (msg.includes('network') || msg.includes('econnrefused')) {
+      return { phase, code: 'infra_network_error', message: errorMessage, details, recoverable: true };
+    }
+    if (msg.includes('api') || msg.includes('429') || msg.includes('500')) {
+      return { phase, code: 'infra_api_error', message: errorMessage, details, recoverable: true };
+    }
+  }
+
+  return { phase, code: 'infra_unknown', message: errorMessage, details, recoverable: false, suggestedFix: 'Add classification for this error pattern' };
+}

@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[25]: Validation of surgical edit execution
-  const engine = new ForgeEngine('i[25]');
+  // i[26]: Root cause analysis enhancement - failure taxonomy
+  const engine = new ForgeEngine('i[26]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
