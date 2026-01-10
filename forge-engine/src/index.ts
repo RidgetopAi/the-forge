@@ -12,6 +12,7 @@
 
 import { createPlantManager } from './departments/plant-manager.js';
 import { createPreparationForeman } from './departments/preparation.js';
+import { createExecutionForeman } from './departments/execution.js';
 import { taskManager } from './state.js';
 import { mandrel } from './mandrel.js';
 import { llmClient, type QualityEvaluation } from './llm.js';
@@ -24,28 +25,42 @@ export class ForgeEngine {
   private instanceId: string;
   private plantManager: ReturnType<typeof createPlantManager>;
   private preparationForeman: ReturnType<typeof createPreparationForeman>;
+  private executionForeman: ReturnType<typeof createExecutionForeman>;
 
   constructor(instanceId: string = 'forge-engine') {
     this.instanceId = instanceId;
     this.plantManager = createPlantManager(instanceId);
     this.preparationForeman = createPreparationForeman(instanceId);
+    this.executionForeman = createExecutionForeman(instanceId);
   }
 
   /**
    * Process a request through The Forge
    *
-   * Currently implements: Intake → Classification → Preparation
-   * Future: Execution → Quality → Documentation
+   * i[13] update: Now implements full pipeline with execution!
+   * Intake → Classification → Preparation → Quality Check → Execution
+   *
+   * @param rawRequest - The development task description
+   * @param projectPath - Path to the project
+   * @param options.execute - If true, execute after preparation (default: false for safety)
    */
   async process(
     rawRequest: string,
-    projectPath: string
+    projectPath: string,
+    options: { execute?: boolean } = {}
   ): Promise<{
     success: boolean;
     taskId: string;
     stage: string;
     result?: unknown;
     qualityEvaluation?: QualityEvaluation;
+    executionResult?: {
+      success: boolean;
+      filesCreated: string[];
+      filesModified: string[];
+      compilationPassed: boolean;
+      notes: string;
+    };
     needsHumanSync?: boolean;
     humanSyncReason?: string;
   }> {
@@ -202,6 +217,40 @@ export class ForgeEngine {
       };
     }
 
+    // Phase 4: Execution (NEW - i[13])
+    // Only execute if explicitly requested
+    if (options.execute) {
+      console.log('\n' + '─'.repeat(40));
+      console.log('PHASE 4: EXECUTION (i[13])');
+      console.log('─'.repeat(40));
+
+      const execResult = await this.executionForeman.execute(intake.taskId, projectPath);
+
+      console.log(`\n[Execution] Success: ${execResult.success}`);
+      console.log(`[Execution] Files Created: ${execResult.filesCreated.join(', ') || 'none'}`);
+      console.log(`[Execution] Files Modified: ${execResult.filesModified.join(', ') || 'none'}`);
+      console.log(`[Execution] Compilation: ${execResult.compilationPassed ? 'PASSED' : 'FAILED'}`);
+
+      // Generate feedback for learning loop
+      await this.executionForeman.generateFeedback(intake.taskId, execResult);
+
+      return {
+        success: execResult.success,
+        taskId: intake.taskId,
+        stage: 'executed',
+        result: pkg,
+        qualityEvaluation: qualityEval,
+        executionResult: {
+          success: execResult.success,
+          filesCreated: execResult.filesCreated,
+          filesModified: execResult.filesModified,
+          compilationPassed: execResult.compilationPassed,
+          notes: execResult.notes,
+        },
+      };
+    }
+
+    // Preparation only (no execution)
     return {
       success: true,
       taskId: intake.taskId,
@@ -226,19 +275,31 @@ export class ForgeEngine {
 async function main() {
   const args = process.argv.slice(2);
 
+  // Parse --execute flag
+  const executeIndex = args.indexOf('--execute');
+  const shouldExecute = executeIndex !== -1;
+  if (shouldExecute) {
+    args.splice(executeIndex, 1);
+  }
+
   if (args.length < 2) {
-    console.log('Usage: npx tsx src/index.ts <project-path> "<request>"');
+    console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
     console.log('');
-    console.log('Example:');
-    console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a new feature"');
+    console.log('Options:');
+    console.log('  --execute  Actually execute the task (default: prepare only)');
+    console.log('');
+    console.log('Examples:');
+    console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
+    console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README" --execute');
     process.exit(1);
   }
 
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[11]'); // Current instance (updated by i[11] - explicit reference extraction)
-  const result = await engine.process(request, projectPath);
+  // i[13]: Added Execution Department - the system can now DO things, not just plan!
+  const engine = new ForgeEngine('i[13]');
+  const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
   console.log('FORGE ENGINE COMPLETE');
@@ -253,5 +314,6 @@ main().catch(console.error);
 export { taskManager, mandrel };
 export { createLearningRetriever, createFeedbackRecorder } from './learning.js';
 export { createQualityGate, QualityGate } from './departments/quality-gate.js';
+export { createExecutionForeman, ExecutionForeman } from './departments/execution.js';
 export { reportExecution } from './report.js';
 export { llmClient, createLLMClient, type ClassificationResult, type QualityEvaluation } from './llm.js';

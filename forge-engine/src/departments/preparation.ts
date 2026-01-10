@@ -317,8 +317,9 @@ interface ArchitectureAnalysisResult {
  * which caused noise: "add a simple README" matched llm.ts because it
  * contains the word "simple".
  *
- * New approach (4 strategies, ordered by priority):
+ * New approach (5 strategies, ordered by priority):
  * 0. Explicit reference extraction (i[11]) - files/types/classes explicitly mentioned
+ * 0.5. Pattern inference (i[12]) - when adding "new X", find existing X implementations
  * 1. Task-type specific files (README task → .md files, docs/, package.json)
  * 2. Path-based matching (file NAMES contain keywords)
  * 3. Content matching with filtered keywords (skip "code noise" words)
@@ -327,6 +328,11 @@ interface ArchitectureAnalysisResult {
  * that's an EXPLICIT reference that must be in mustRead. Keyword matching
  * doesn't catch this - we need to extract file paths, type names, and
  * class names from the task description and resolve them to actual files.
+ *
+ * i[12] insight: When a task says "add the Execution Department", we should
+ * automatically find existing Department implementations as patterns, even
+ * if they weren't explicitly mentioned. This closes the gap between explicit
+ * references and generic keyword matching.
  */
 class FileDiscoveryWorker {
   // Words that appear commonly in code but aren't meaningful for file discovery
@@ -373,6 +379,16 @@ class FileDiscoveryWorker {
     console.log('[Worker:FileDiscovery] Strategy 0: Explicit reference extraction (i[11])');
     const explicitRefs = await this.discoverByExplicitReferences(projectPath, taskDescription);
     for (const file of explicitRefs) {
+      if (!relevantFiles.find(f => f.path === file.path)) {
+        relevantFiles.push({ ...file, priority: 'high' });
+      }
+    }
+
+    // Strategy 0.5 (i[12]): Pattern inference
+    // When task says "add new X", find existing X implementations as patterns
+    console.log('[Worker:FileDiscovery] Strategy 0.5: Pattern inference (i[12])');
+    const patternRefs = await this.discoverByPatternInference(projectPath, taskDescription);
+    for (const file of patternRefs) {
       if (!relevantFiles.find(f => f.path === file.path)) {
         relevantFiles.push({ ...file, priority: 'high' });
       }
@@ -596,6 +612,144 @@ class FileDiscoveryWorker {
     }
 
     console.log(`[Worker:FileDiscovery] Strategy 0: Found ${files.length} explicit references`);
+    return files;
+  }
+
+  /**
+   * Strategy 0.5 (i[12]): Discover existing implementations when creating something new.
+   *
+   * When a task says "add the Execution Department" or "create a new Worker",
+   * this strategy finds existing implementations of the same concept to use
+   * as patterns.
+   *
+   * Key insight: The explicit reference extraction (Strategy 0) only works when
+   * the task explicitly names files. But when asked to "add a new Department",
+   * developers expect the system to find existing Department implementations
+   * as examples to follow.
+   *
+   * Pattern matching approach:
+   * 1. Detect "add/create/implement/build new [Concept]" patterns
+   * 2. Extract the Concept (e.g., "Department", "Worker", "Foreman", "Component")
+   * 3. Search for existing files/classes that match this Concept
+   * 4. Return them as "existing pattern to follow"
+   */
+  private async discoverByPatternInference(
+    projectPath: string,
+    taskDescription: string
+  ): Promise<Array<{ path: string; reason: string }>> {
+    const files: Array<{ path: string; reason: string }> = [];
+
+    if (!taskDescription) return files;
+
+    const lower = taskDescription.toLowerCase();
+
+    // Detect "add/create/implement new [Concept]" patterns
+    // Match patterns like:
+    // - "add the Execution Department"
+    // - "create a new Worker"
+    // - "implement a Foreman"
+    // - "build the Documentation Department"
+    const addPatterns = [
+      /(?:add|create|implement|build|make|write)\s+(?:a\s+)?(?:new\s+)?(?:the\s+)?(\w+)\s+(department|worker|foreman|component|service|handler|manager|controller|module)/gi,
+      /(?:add|create|implement|build|make|write)\s+(?:a\s+)?(?:new\s+)?(?:the\s+)?(\w+(?:department|worker|foreman|component|service|handler|manager|controller|module))/gi,
+    ];
+
+    const conceptsToFind: Set<string> = new Set();
+
+    for (const pattern of addPatterns) {
+      let match;
+      while ((match = pattern.exec(taskDescription)) !== null) {
+        // Extract the type of thing being created (e.g., "Department", "Worker")
+        if (match[2]) {
+          conceptsToFind.add(match[2].toLowerCase());
+        }
+        // Also check for combined words like "ExecutionDepartment"
+        if (match[1]) {
+          const combined = match[1].toLowerCase();
+          for (const suffix of ['department', 'worker', 'foreman', 'component', 'service', 'handler', 'manager', 'controller', 'module']) {
+            if (combined.endsWith(suffix)) {
+              conceptsToFind.add(suffix);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Also check for standalone mentions of architectural concepts in creation context
+    const architecturalConcepts = ['department', 'foreman', 'worker', 'component', 'service', 'handler', 'manager', 'controller', 'module'];
+    for (const concept of architecturalConcepts) {
+      // Check if this concept is mentioned in a creation context
+      const creationWords = ['add', 'create', 'implement', 'build', 'new', 'make', 'write'];
+      for (const word of creationWords) {
+        if (lower.includes(word) && lower.includes(concept)) {
+          conceptsToFind.add(concept);
+          break;
+        }
+      }
+    }
+
+    console.log(`[Worker:FileDiscovery] Strategy 0.5: Concepts to find patterns for: ${[...conceptsToFind].join(', ') || 'none'}`);
+
+    // For each concept, find existing implementations
+    for (const concept of conceptsToFind) {
+      // Strategy 1: Find files in directories named after the concept
+      // e.g., "department" → look in /departments/ directory
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -type f -path "*/${concept}s/*" -name "*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === foundPath)) {
+            files.push({
+              path: foundPath,
+              reason: `Existing ${concept} implementation (pattern to follow)`,
+            });
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Strategy 2: Find classes/types that end with the concept
+      // e.g., "Foreman" → find "PreparationForeman", "QualityForeman"
+      const capitalizedConcept = concept.charAt(0).toUpperCase() + concept.slice(1);
+      try {
+        const { stdout } = await execAsync(
+          `rg -l "class\\s+\\w+${capitalizedConcept}\\b|interface\\s+\\w+${capitalizedConcept}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -3`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === foundPath)) {
+            files.push({
+              path: foundPath,
+              reason: `Existing ${capitalizedConcept} class (pattern to follow)`,
+            });
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Strategy 3: Find files named after the concept
+      // e.g., "worker" → find "*worker*.ts", "*Worker*.ts"
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -type f -iname "*${concept}*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -3`,
+          { timeout: 5000 }
+        );
+
+        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === foundPath)) {
+            files.push({
+              path: foundPath,
+              reason: `File with "${concept}" in name (possible pattern)`,
+            });
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    console.log(`[Worker:FileDiscovery] Strategy 0.5: Found ${files.length} pattern inference files`);
     return files;
   }
 
