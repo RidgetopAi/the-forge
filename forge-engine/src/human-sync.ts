@@ -656,6 +656,9 @@ export class HumanSyncService {
 
   /**
    * Create a HumanSyncRequest from a generated question
+   *
+   * i[17] update: Now persists to Mandrel for retrieval by --respond command.
+   * This closes the Human Sync loop - requests survive CLI restarts.
    */
   async createRequest(
     taskId: string,
@@ -675,18 +678,25 @@ export class HumanSyncService {
       })),
     };
 
-    // Store in memory
+    // Store in memory (for backward compatibility during session)
     this.pendingRequests.set(request.id, request);
 
-    // Store to Mandrel
+    // i[17]: Persist to Mandrel for cross-session retrieval
+    // This is the key change that enables the --respond command to work
+    await saveRequestToMandrel(request, question);
+
+    // Also store human-readable version for context (legacy format)
     await mandrel.storeContext(
       `Human Sync Request created:\n` +
+      `Request ID: ${request.id}\n` +
       `Task: ${taskId}\n` +
       `Trigger: ${trigger}\n` +
       `Question: ${question.question}\n` +
       `Context: ${question.context}\n` +
-      `Options: ${question.options.map(o => o.label).join(', ')}\n` +
-      `Urgency: ${question.urgency}`,
+      `Options: ${question.options.map(o => `[${o.id}] ${o.label}`).join(', ')}\n` +
+      `Urgency: ${question.urgency}\n\n` +
+      `To respond, run:\n` +
+      `  npx tsx src/index.ts --respond ${request.id} <option-id> [--notes "..."]`,
       'discussion',
       ['human-sync', 'request', trigger, `urgency-${question.urgency}`]
     );
@@ -847,3 +857,155 @@ export const builtInTriggers = {
   qualityThresholdTrigger,
   ambiguousTargetTrigger,
 };
+
+// ============================================================================
+// Request Persistence (i[17] addition)
+// ============================================================================
+
+/**
+ * Save a HumanSyncRequest to Mandrel for persistence across CLI invocations.
+ *
+ * i[17]: This closes the Human Sync loop. Previously, requests were only
+ * stored in-memory and lost when the CLI exited. Now they persist to Mandrel
+ * and can be retrieved by ID for response processing.
+ */
+export async function saveRequestToMandrel(
+  request: HumanSyncRequest,
+  question: GeneratedQuestion
+): Promise<{ success: boolean; id?: string }> {
+  // Store as structured JSON with special tags for retrieval
+  const payload = {
+    request: {
+      id: request.id,
+      taskId: request.taskId,
+      created: request.created.toISOString(),
+      trigger: request.trigger,
+      question: request.question,
+      context: request.context,
+      options: request.options,
+    },
+    question: {
+      question: question.question,
+      context: question.context,
+      options: question.options,
+      allowFreeform: question.allowFreeform,
+      urgency: question.urgency,
+      triggeredBy: question.triggeredBy,
+    },
+    status: 'pending', // Will be updated when response received
+  };
+
+  const result = await mandrel.storeContext(
+    `HUMAN_SYNC_REQUEST_JSON:${JSON.stringify(payload)}`,
+    'discussion',
+    ['human-sync-request', 'pending', `request-${request.id}`, `task-${request.taskId}`]
+  );
+
+  return result;
+}
+
+/**
+ * Load a HumanSyncRequest from Mandrel by its ID.
+ *
+ * i[17]: This enables the --respond command to retrieve the original request
+ * context, understand what was asked, and process the user's response.
+ */
+export async function loadRequestFromMandrel(requestId: string): Promise<{
+  success: boolean;
+  request?: HumanSyncRequest;
+  question?: GeneratedQuestion;
+  error?: string;
+}> {
+  // i[17]: Search for the JSON-formatted request specifically
+  // Using the request ID in the query to find the right context
+  const searchQuery = `HUMAN_SYNC_REQUEST_JSON request-${requestId}`;
+  const searchResults = await mandrel.searchContext(searchQuery, 10);
+
+  if (!searchResults) {
+    return { success: false, error: 'Request not found in Mandrel' };
+  }
+
+  // Extract context IDs from search results
+  const ids = mandrel.extractIdsFromSearchResults(searchResults);
+  console.log(`[HumanSync] Found ${ids.length} potential matches`);
+
+  if (ids.length === 0) {
+    return { success: false, error: 'No matching request found' };
+  }
+
+  // Try each ID until we find the right JSON-formatted request
+  for (const id of ids) {
+    const context = await mandrel.getContextById(id);
+
+    if (context.success && context.content) {
+      // Parse the JSON payload from the content
+      const jsonMatch = context.content.match(/HUMAN_SYNC_REQUEST_JSON:([\s\S]+)/);
+
+      if (jsonMatch) {
+        try {
+          const payload = JSON.parse(jsonMatch[1]);
+
+          // Verify this is the right request by checking the ID
+          if (payload.request?.id !== requestId) {
+            console.log(`[HumanSync] Found different request ${payload.request?.id}, continuing...`);
+            continue;
+          }
+
+          // Reconstruct the HumanSyncRequest
+          const request: HumanSyncRequest = {
+            id: payload.request.id,
+            taskId: payload.request.taskId,
+            created: new Date(payload.request.created),
+            trigger: payload.request.trigger,
+            question: payload.request.question,
+            context: payload.request.context,
+            options: payload.request.options,
+          };
+
+          // Reconstruct the GeneratedQuestion
+          const question: GeneratedQuestion = {
+            question: payload.question.question,
+            context: payload.question.context,
+            options: payload.question.options,
+            allowFreeform: payload.question.allowFreeform,
+            urgency: payload.question.urgency,
+            triggeredBy: payload.question.triggeredBy,
+          };
+
+          console.log(`[HumanSync] Successfully loaded request ${requestId}`);
+          return { success: true, request, question };
+        } catch (parseError) {
+          console.error('[HumanSync] Failed to parse stored request:', parseError);
+        }
+      }
+    }
+  }
+
+  return { success: false, error: 'Could not find or parse stored request' };
+}
+
+/**
+ * Mark a request as responded in Mandrel.
+ *
+ * i[17]: After processing a response, we store the completion record
+ * so the learning system can see what decisions were made.
+ */
+export async function markRequestResponded(
+  requestId: string,
+  taskId: string,
+  selectedOption: string,
+  action: 'proceed' | 'modify' | 'abort' | 'retry',
+  additionalNotes?: string
+): Promise<void> {
+  await mandrel.storeContext(
+    `Human Sync Response Processed:\n` +
+    `Request ID: ${requestId}\n` +
+    `Task ID: ${taskId}\n` +
+    `Selected Option: ${selectedOption}\n` +
+    `Action: ${action}\n` +
+    `Notes: ${additionalNotes ?? 'none'}\n` +
+    `Processed: ${new Date().toISOString()}`,
+    'decision',
+    ['human-sync-response', 'processed', `request-${requestId}`, `task-${taskId}`, `action-${action}`]
+  );
+}

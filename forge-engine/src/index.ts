@@ -345,8 +345,180 @@ export class ForgeEngine {
 // CLI Interface
 // ============================================================================
 
+/**
+ * Handle --respond command for Human Sync responses
+ *
+ * i[17]: This is the key addition that closes the Human Sync loop.
+ * Users can now respond to Human Sync requests and resume the pipeline.
+ *
+ * Usage: npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]
+ */
+async function handleRespond(args: string[]): Promise<void> {
+  // Import the persistence functions
+  const { loadRequestFromMandrel, markRequestResponded } = await import('./human-sync.js');
+
+  // Parse arguments
+  const notesIndex = args.indexOf('--notes');
+  let notes: string | undefined;
+  if (notesIndex !== -1 && args[notesIndex + 1]) {
+    notes = args[notesIndex + 1];
+    args.splice(notesIndex, 2);
+  }
+
+  const [requestId, optionId] = args;
+
+  if (!requestId || !optionId) {
+    console.log('Usage: npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
+    console.log('');
+    console.log('Arguments:');
+    console.log('  request-id  The Human Sync request ID (UUID from the prompt)');
+    console.log('  option-id   The option ID to select (e.g., "proceed_careful", "abort")');
+    console.log('  --notes     Optional additional notes or clarification');
+    console.log('');
+    console.log('Example:');
+    console.log('  npx tsx src/index.ts --respond abc-123... proceed_careful --notes "I reviewed the risks"');
+    process.exit(1);
+  }
+
+  console.log('═'.repeat(60));
+  console.log('THE FORGE - Human Sync Response Handler (i[17])');
+  console.log('═'.repeat(60));
+
+  // Connect to Mandrel
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.error('[Respond] Could not connect to Mandrel. Cannot retrieve request.');
+    process.exit(1);
+  }
+  console.log('[Respond] Connected to Mandrel');
+
+  // Load the original request
+  console.log(`[Respond] Loading request ${requestId}...`);
+  const loaded = await loadRequestFromMandrel(requestId);
+
+  if (!loaded.success || !loaded.request || !loaded.question) {
+    console.error(`[Respond] Failed to load request: ${loaded.error}`);
+    console.error('[Respond] Make sure the request ID is correct and the request was created recently.');
+    process.exit(1);
+  }
+
+  const { request, question } = loaded;
+
+  // Display the original question for context
+  console.log('\n' + '─'.repeat(40));
+  console.log('ORIGINAL HUMAN SYNC REQUEST');
+  console.log('─'.repeat(40));
+  console.log(`Task ID: ${request.taskId}`);
+  console.log(`Trigger: ${request.trigger}`);
+  console.log(`Urgency: ${question.urgency}`);
+  console.log(`\nQuestion: ${question.question}`);
+  console.log(`\nContext: ${question.context.slice(0, 300)}...`);
+  console.log('\nAvailable Options:');
+  for (const opt of question.options) {
+    console.log(`  [${opt.id}] ${opt.label}`);
+    console.log(`      ${opt.description}`);
+  }
+
+  // Validate the selected option
+  const selectedOption = question.options.find(o => o.id === optionId);
+  if (!selectedOption && !question.allowFreeform) {
+    console.error(`\n[Respond] Invalid option: "${optionId}"`);
+    console.error(`[Respond] Valid options: ${question.options.map(o => o.id).join(', ')}`);
+    process.exit(1);
+  }
+
+  // Process the response
+  console.log('\n' + '─'.repeat(40));
+  console.log('PROCESSING RESPONSE');
+  console.log('─'.repeat(40));
+  console.log(`Selected: ${optionId} ${selectedOption ? `(${selectedOption.label})` : '(freeform)'}`);
+  if (notes) {
+    console.log(`Notes: ${notes}`);
+  }
+
+  // The service needs the request in memory to process it
+  // Since we loaded from Mandrel, manually call processResponse logic
+  const optionLower = optionId.toLowerCase();
+  type ResponseAction = 'proceed' | 'modify' | 'abort' | 'retry';
+  let action: ResponseAction;
+
+  if (optionLower.includes('abort') || optionLower.includes('cancel')) {
+    action = 'abort';
+  } else if (optionLower.includes('proceed') || optionLower.includes('execute')) {
+    action = 'proceed';
+  } else if (optionLower.includes('clarify') || optionLower.includes('expand') ||
+             optionLower.includes('specify') || optionLower.includes('modify')) {
+    action = 'modify';
+  } else if (optionLower.includes('retry')) {
+    action = 'retry';
+  } else {
+    // Default to proceed for most selections
+    action = 'proceed';
+  }
+
+  console.log(`[Respond] Determined action: ${action}`);
+
+  // Mark the request as responded in Mandrel
+  await markRequestResponded(requestId, request.taskId, optionId, action, notes);
+
+  // Handle the action
+  console.log('\n' + '─'.repeat(40));
+  console.log('RESULT');
+  console.log('─'.repeat(40));
+
+  switch (action) {
+    case 'proceed':
+      console.log('[Respond] Task will proceed with current preparation.');
+      console.log('[Respond] The Human Sync concern has been acknowledged.');
+      console.log('');
+      console.log('To continue execution, run:');
+      console.log(`  npx tsx src/index.ts --resume ${request.taskId} --execute`);
+      break;
+
+    case 'modify':
+      console.log('[Respond] Task requires modification based on your input.');
+      if (notes) {
+        console.log(`[Respond] Your clarification: ${notes}`);
+      }
+      console.log('');
+      console.log('To restart preparation with clarification, run:');
+      console.log(`  npx tsx src/index.ts <project-path> "<original-request>. ${notes ?? 'Clarification: ...'}" --execute`);
+      break;
+
+    case 'abort':
+      console.log('[Respond] Task has been aborted as requested.');
+      console.log('[Respond] No further action needed.');
+      // Store abort decision
+      await mandrel.storeContext(
+        `Task ${request.taskId} aborted via Human Sync.\n` +
+        `Request: ${requestId}\n` +
+        `Reason: User selected abort option\n` +
+        `Notes: ${notes ?? 'none'}`,
+        'decision',
+        ['task-aborted', 'human-sync', `task-${request.taskId}`]
+      );
+      break;
+
+    case 'retry':
+      console.log('[Respond] Task will be retried with adjustments.');
+      break;
+  }
+
+  console.log('\n' + '═'.repeat(60));
+  console.log('RESPONSE PROCESSED');
+  console.log('═'.repeat(60));
+}
+
 async function main() {
   const args = process.argv.slice(2);
+
+  // i[17]: Handle --respond command for Human Sync responses
+  const respondIndex = args.indexOf('--respond');
+  if (respondIndex !== -1) {
+    const respondArgs = args.slice(respondIndex + 1);
+    await handleRespond(respondArgs);
+    return;
+  }
 
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
@@ -357,21 +529,28 @@ async function main() {
 
   if (args.length < 2) {
     console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
+    console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
+    console.log('');
+    console.log('Commands:');
+    console.log('  <project-path> "<request>"   Process a new task');
+    console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('');
     console.log('Options:');
     console.log('  --execute  Actually execute the task (default: prepare only)');
+    console.log('  --notes    Additional notes for Human Sync response');
     console.log('');
     console.log('Examples:');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README" --execute');
+    console.log('  npx tsx src/index.ts --respond abc-123 proceed_careful --notes "I reviewed the risks"');
     process.exit(1);
   }
 
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[16]: Added Context Budget Manager - intelligent context management
-  const engine = new ForgeEngine('i[16]');
+  // i[17]: Updated instance ID - closes the Human Sync loop
+  const engine = new ForgeEngine('i[17]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -390,7 +569,15 @@ export { createQualityGate, QualityGate } from './departments/quality-gate.js';
 export { createExecutionForeman, ExecutionForeman } from './departments/execution.js';
 export { reportExecution } from './report.js';
 export { llmClient, createLLMClient, type ClassificationResult, type QualityEvaluation } from './llm.js';
-export { createHumanSyncService, HumanSyncService, builtInTriggers, type GeneratedQuestion } from './human-sync.js';
+export {
+  createHumanSyncService,
+  HumanSyncService,
+  builtInTriggers,
+  saveRequestToMandrel,
+  loadRequestFromMandrel,
+  markRequestResponded,
+  type GeneratedQuestion,
+} from './human-sync.js';
 // i[16]: Context Budget Manager exports
 export {
   TokenCounter,

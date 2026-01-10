@@ -195,6 +195,10 @@ export class MandrelClient {
 
   /**
    * Execute a Mandrel MCP tool via SSH+curl with retry logic
+   *
+   * i[17]: Fixed shell quoting by using base64 encoding.
+   * This was an inherited bug from i[14-16] that broke when content
+   * contained apostrophes or special characters.
    */
   private async call<T>(
     toolName: string,
@@ -203,10 +207,14 @@ export class MandrelClient {
   ): Promise<MandrelResponse<T>> {
     const maxRetries = options.retries ?? this.maxRetries;
     const argsJson = JSON.stringify({ arguments: args });
-    // Escape single quotes in JSON for shell
-    const escapedArgs = argsJson.replace(/'/g, "'\\''");
 
-    const command = `ssh hetzner 'curl -s -X POST http://localhost:8080/mcp/tools/${toolName} -H "Content-Type: application/json" -d '\\''${escapedArgs}'\\'''`;
+    // i[17]: Use base64 encoding to avoid shell quoting issues
+    // The previous approach of escaping single quotes was fragile
+    // and failed when content contained apostrophes or special chars
+    const base64Args = Buffer.from(argsJson).toString('base64');
+
+    // Use bash's base64 decode to reconstruct the JSON
+    const command = `ssh hetzner 'echo "${base64Args}" | base64 -d | curl -s -X POST http://localhost:8080/mcp/tools/${toolName} -H "Content-Type: application/json" -d @-'`;
 
     let lastError: MandrelError | undefined;
 
@@ -430,15 +438,19 @@ export class MandrelClient {
   }
 
   /**
-   * Extract context IDs from smart_search results (i[14] addition)
+   * Extract context IDs from search results (i[14] addition, i[17] fix)
    *
-   * smart_search returns display text with IDs like:
-   * "🆔 ID: f1a40331-5a09-481a-aa48-a4a32cfb6306"
+   * Search results include IDs in various formats:
+   * - "🆔 ID: f1a40331-5a09-481a-aa48-a4a32cfb6306" (some formats)
+   * - "   ID: f1a40331-5a09-481a-aa48-a4a32cfb6306" (context_search)
+   *
+   * i[17]: Fixed regex to match both formats (with and without emoji)
    *
    * This helper extracts all UUIDs from the results.
    */
   extractIdsFromSearchResults(searchResults: string): string[] {
-    const uuidPattern = /🆔 ID: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+    // Match IDs with optional emoji prefix: "🆔 ID:" or just "ID:"
+    const uuidPattern = /(?:🆔\s*)?ID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
     const ids: string[] = [];
     let match;
 
