@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[24]: Surgical edit execution - fixes 14.3% success rate root cause
-  const engine = new ForgeEngine('i[24]');
+  // i[25]: Validation of surgical edit execution
+  const engine = new ForgeEngine('i[25]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

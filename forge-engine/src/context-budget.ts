@@ -318,6 +318,10 @@ export class FileContentExtractor {
 
   /**
    * Extract exports, type definitions, and function signatures from TypeScript/JavaScript
+   *
+   * i[25] enhancement: Also extract route handlers (app.get, router.post, etc.)
+   * for API files. These are critical for edit actions since they contain the
+   * code the LLM needs to surgically modify.
    */
   private extractSignatures(content: string, ext: string): string {
     if (!['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
@@ -356,6 +360,26 @@ export class FileContentExtractor {
           inMultiLineSignature = false;
           multiLineBuffer = '';
         }
+        continue;
+      }
+
+      // i[25]: Route handlers - include FULL body for surgical edits
+      // These are critical for API modifications and are usually small
+      if (trimmed.match(/^(app|router)\.(get|post|put|patch|delete|use)\s*\(/)) {
+        // Capture the entire route handler
+        let routeContent = line;
+        let depth = (line.match(/\(/g) || []).length - (line.match(/\)/g) || []).length;
+        depth += (line.match(/{/g) || []).length - (line.match(/}/g) || []).length;
+
+        let j = i + 1;
+        while (j < lines.length && depth > 0) {
+          routeContent += '\n' + lines[j];
+          depth += (lines[j].match(/\(/g) || []).length - (lines[j].match(/\)/g) || []).length;
+          depth += (lines[j].match(/{/g) || []).length - (lines[j].match(/}/g) || []).length;
+          j++;
+        }
+        signatures.push('// Route handler:\n' + routeContent);
+        i = j - 1;
         continue;
       }
 
@@ -446,6 +470,14 @@ export class FileContentExtractor {
       // Import statements (useful for understanding dependencies)
       else if (trimmed.startsWith('import ')) {
         signatures.push(line);
+      }
+      // i[25]: Module-level const/let declarations (often needed for edits)
+      // Include things like `const app = express()`, `const PORT = ...`, `const __dirname = ...`
+      else if (trimmed.match(/^const\s+\w+\s*=/) || trimmed.match(/^let\s+\w+\s*=/)) {
+        // Only single-line declarations, not complex objects/functions
+        if (!trimmed.includes('{') || trimmed.includes('}')) {
+          signatures.push(line);
+        }
       }
     }
 
