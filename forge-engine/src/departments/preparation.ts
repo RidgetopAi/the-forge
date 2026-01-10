@@ -22,6 +22,257 @@ import * as path from 'path';
 const execAsync = promisify(exec);
 
 // ============================================================================
+// Task Type Detection & Content Generation (i[10] contribution)
+// ============================================================================
+
+/**
+ * Task types for content-aware preparation.
+ *
+ * i[10] contribution: Previous passes made file discovery task-type-aware (i[9]),
+ * but content generation (acceptance criteria, constraints, patterns) was still
+ * code-centric for all tasks. This led to nonsensical preparations like:
+ * - "add a README" → acceptance: "TypeScript compilation must pass"
+ *
+ * This enum enables task-type-aware CONTENT generation, not just file discovery.
+ */
+type TaskContentType = 'documentation' | 'testing' | 'configuration' | 'code';
+
+/**
+ * Generated content for a task type.
+ */
+interface TaskTypeContent {
+  taskType: TaskContentType;
+  acceptanceCriteria: string[];
+  qualityConstraints: string[];
+  patterns: {
+    conventions: string;
+    organization: string;
+    quality: string;
+  };
+}
+
+/**
+ * TaskTypeContentGenerator
+ *
+ * i[10] contribution: Generates task-type-appropriate content for ContextPackages.
+ *
+ * This fixes the problem identified by i[9]: the LLM quality evaluation scored
+ * 45/100 for a README task because acceptance criteria said "Code compiles"
+ * and constraints said "TypeScript compilation must pass".
+ *
+ * Now:
+ * - Documentation tasks → Markdown patterns, readability criteria
+ * - Testing tasks → Test coverage, assertion patterns
+ * - Configuration tasks → Validation, compatibility criteria
+ * - Code tasks → Compilation, type safety (the previous default)
+ */
+class TaskTypeContentGenerator {
+  /**
+   * Detect the task type from the request description.
+   *
+   * Reuses detection patterns from FileDiscoveryWorker (i[9]) for consistency.
+   */
+  detectTaskType(taskDescription: string): TaskContentType {
+    const lower = taskDescription.toLowerCase();
+
+    // Documentation detection
+    if (lower.includes('readme') ||
+        lower.includes('documentation') ||
+        lower.includes('docs') ||
+        lower.includes('comment') ||
+        lower.includes('document') ||
+        lower.includes('api docs') ||
+        lower.includes('jsdoc') ||
+        lower.includes('tsdoc')) {
+      return 'documentation';
+    }
+
+    // Testing detection
+    if (lower.includes('test') ||
+        lower.includes('spec') ||
+        lower.includes('coverage') ||
+        lower.includes('unit test') ||
+        lower.includes('integration test') ||
+        lower.includes('e2e')) {
+      return 'testing';
+    }
+
+    // Configuration detection
+    if (lower.includes('config') ||
+        lower.includes('setting') ||
+        lower.includes('setup') ||
+        lower.includes('environment') ||
+        lower.includes('env') ||
+        lower.includes('.json') ||
+        lower.includes('.yaml') ||
+        lower.includes('.yml') ||
+        lower.includes('tsconfig') ||
+        lower.includes('eslint') ||
+        lower.includes('prettier')) {
+      return 'configuration';
+    }
+
+    // Default to code
+    return 'code';
+  }
+
+  /**
+   * Generate task-type-appropriate content.
+   */
+  generate(taskDescription: string): TaskTypeContent {
+    const taskType = this.detectTaskType(taskDescription);
+
+    switch (taskType) {
+      case 'documentation':
+        return this.generateDocumentationContent(taskDescription);
+      case 'testing':
+        return this.generateTestingContent(taskDescription);
+      case 'configuration':
+        return this.generateConfigurationContent(taskDescription);
+      case 'code':
+      default:
+        return this.generateCodeContent(taskDescription);
+    }
+  }
+
+  /**
+   * Documentation task content (README, docs, comments)
+   */
+  private generateDocumentationContent(taskDescription: string): TaskTypeContent {
+    const lower = taskDescription.toLowerCase();
+    const criteria: string[] = [];
+
+    // Base documentation criteria
+    if (lower.includes('readme')) {
+      criteria.push('README.md file exists');
+      criteria.push('README has required sections (description, usage, installation)');
+    } else {
+      criteria.push('Documentation file(s) created or updated');
+    }
+
+    criteria.push('Documentation is clear and readable');
+    criteria.push('All links are valid (no broken links)');
+    criteria.push('Code examples are accurate and runnable');
+
+    return {
+      taskType: 'documentation',
+      acceptanceCriteria: criteria,
+      qualityConstraints: [
+        'Valid Markdown syntax',
+        'Consistent heading hierarchy (h1 → h2 → h3)',
+        'Accurate and up-to-date information',
+        'No spelling or grammar errors',
+      ],
+      patterns: {
+        conventions: 'Markdown formatting conventions',
+        organization: 'Logical section ordering (overview → details → examples)',
+        quality: 'Clear, concise writing with code examples where appropriate',
+      },
+    };
+  }
+
+  /**
+   * Testing task content (tests, specs, coverage)
+   */
+  private generateTestingContent(taskDescription: string): TaskTypeContent {
+    const lower = taskDescription.toLowerCase();
+    const criteria: string[] = [];
+
+    criteria.push('All tests pass');
+    criteria.push('Test coverage maintained or improved');
+
+    if (lower.includes('new test') || lower.includes('add test')) {
+      criteria.push('New test file(s) created in correct location');
+      criteria.push('Tests follow project naming conventions');
+    }
+
+    if (lower.includes('fix') || lower.includes('broken')) {
+      criteria.push('Previously failing test now passes');
+    }
+
+    criteria.push('No flaky tests introduced');
+
+    return {
+      taskType: 'testing',
+      acceptanceCriteria: criteria,
+      qualityConstraints: [
+        'Use project test framework (Jest/Vitest/Mocha)',
+        'Follow Arrange-Act-Assert pattern',
+        'Tests are isolated (no shared state)',
+        'Descriptive test names explaining expected behavior',
+      ],
+      patterns: {
+        conventions: 'describe/it blocks with clear naming (*.test.ts or *.spec.ts)',
+        organization: 'Tests co-located with source or in __tests__ directory',
+        quality: 'Fast, deterministic, independent tests',
+      },
+    };
+  }
+
+  /**
+   * Configuration task content (config files, settings)
+   */
+  private generateConfigurationContent(taskDescription: string): TaskTypeContent {
+    const criteria: string[] = [];
+
+    criteria.push('Configuration file is valid (parseable JSON/YAML/etc)');
+    criteria.push('Application starts successfully with new configuration');
+    criteria.push('Configuration changes take effect as expected');
+
+    return {
+      taskType: 'configuration',
+      acceptanceCriteria: criteria,
+      qualityConstraints: [
+        'Backward compatible (existing workflows not broken)',
+        'New options documented (inline comments or README)',
+        'Sensible defaults for optional settings',
+        'Validation for required settings',
+      ],
+      patterns: {
+        conventions: 'Match existing config file format and structure',
+        organization: 'Group related settings, use comments for sections',
+        quality: 'Environment-specific overrides where appropriate',
+      },
+    };
+  }
+
+  /**
+   * Code task content (features, bugfixes, refactors) - the original default
+   */
+  private generateCodeContent(taskDescription: string): TaskTypeContent {
+    const lower = taskDescription.toLowerCase();
+    const criteria: string[] = [];
+
+    // Base code criteria
+    criteria.push('Code compiles without errors');
+    criteria.push('Functionality works as described');
+
+    if (lower.includes('test')) {
+      criteria.push('Tests pass');
+    }
+
+    if (lower.includes('error') || lower.includes('bug')) {
+      criteria.push('Error no longer occurs');
+    }
+
+    return {
+      taskType: 'code',
+      acceptanceCriteria: criteria,
+      qualityConstraints: [
+        'TypeScript compilation must pass',
+        'Existing tests must pass',
+        'No new linting errors',
+      ],
+      patterns: {
+        conventions: 'camelCase (TypeScript default)',
+        organization: 'ES Modules with clear imports/exports',
+        quality: 'Type-safe, error handling, follows existing patterns',
+      },
+    };
+  }
+}
+
+// ============================================================================
 // Worker Results (what workers produce)
 // ============================================================================
 
@@ -427,6 +678,7 @@ export class PreparationForeman {
   private patternWorker: PatternExtractionWorker;
   private architectureWorker: ArchitectureAnalysisWorker;
   private learningRetriever: LearningRetriever;
+  private contentGenerator: TaskTypeContentGenerator; // i[10]: Task-type-aware content
 
   constructor(instanceId: string) {
     this.instanceId = instanceId;
@@ -434,6 +686,7 @@ export class PreparationForeman {
     this.patternWorker = new PatternExtractionWorker();
     this.architectureWorker = new ArchitectureAnalysisWorker();
     this.learningRetriever = createLearningRetriever(instanceId);
+    this.contentGenerator = new TaskTypeContentGenerator(); // i[10]
   }
 
   /**
@@ -503,6 +756,13 @@ export class PreparationForeman {
       // Phase 6: Package Validation (internal)
       console.log('[Foreman:Preparation] Phase 6: Package Validation');
 
+      // Phase 6.5: Task-Type-Aware Content Generation (i[10])
+      // This fixes the problem where ContextPackages had code-centric content
+      // even for non-code tasks like README creation.
+      console.log('[Foreman:Preparation] Phase 6.5: Task-Type Content Generation (i[10])');
+      const taskTypeContent = this.contentGenerator.generate(task.rawRequest);
+      console.log(`[Foreman:Preparation] Detected task type: ${taskTypeContent.taskType}`);
+
       // Phase 7: Build the ContextPackage
       console.log('[Foreman:Preparation] Phase 7: Building ContextPackage');
 
@@ -514,7 +774,8 @@ export class PreparationForeman {
 
         task: {
           description: task.rawRequest,
-          acceptanceCriteria: this.inferAcceptanceCriteria(task.rawRequest),
+          // i[10]: Use task-type-aware acceptance criteria instead of code-centric defaults
+          acceptanceCriteria: taskTypeContent.acceptanceCriteria,
           scope: {
             inScope: keywords,
             outOfScope: ['unrelated features', 'major refactoring'],
@@ -571,19 +832,21 @@ export class PreparationForeman {
           ),
         },
 
+        // i[10]: Merge discovered patterns with task-type-aware patterns
         patterns: {
-          namingConventions: patternResult.namingConventions,
-          fileOrganization: patternResult.fileOrganization,
-          testingApproach: patternResult.testingApproach,
-          errorHandling: patternResult.errorHandling,
-          codeStyle: patternResult.codeStyle,
+          namingConventions: taskTypeContent.patterns.conventions,
+          fileOrganization: taskTypeContent.patterns.organization,
+          testingApproach: patternResult.testingApproach, // Keep project-specific discovery
+          errorHandling: patternResult.errorHandling,     // Keep project-specific discovery
+          codeStyle: patternResult.codeStyle,             // Keep project-specific discovery
         },
 
+        // i[10]: Use task-type-aware constraints instead of hardcoded code constraints
         constraints: {
           technical: archResult.dependencies.length > 10
             ? ['Large dependency graph - minimize new dependencies']
             : [],
-          quality: ['TypeScript compilation must pass', 'Existing tests must pass'],
+          quality: taskTypeContent.qualityConstraints,
           timeline: null,
         },
 
