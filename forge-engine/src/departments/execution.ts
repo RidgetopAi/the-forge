@@ -69,6 +69,8 @@ interface ExecutionResult {
   filesModified: string[];
   filesRead: string[];
   compilationPassed: boolean;
+  compilationAttempts: number; // i[27]: Track self-heal attempts
+  compilationSelfHealed: boolean; // i[27]: Did self-heal fix compilation?
   validationPassed: boolean; // i[18]: Tool Building result
   validationSummary?: ValidationSummary; // i[18]: Detailed validation results
   notes: string;
@@ -752,6 +754,165 @@ Generate the code now:`;
   getLastBudgetResult() {
     return this.lastBudgetResult;
   }
+
+  /**
+   * i[27]: Generate code to fix compilation errors.
+   *
+   * This is the self-heal capability: when compilation fails, we feed the
+   * compiler errors back to the LLM and ask it to fix ONLY those errors.
+   *
+   * Key constraints:
+   * - Only fix the specific errors shown
+   * - Prefer 'edit' action with surgical search/replace
+   * - Don't refactor or touch unrelated code
+   * - Don't invent new content for files you haven't fully seen
+   */
+  async generateWithCompilationFeedback(
+    pkg: ContextPackage,
+    projectPath: string,
+    compilerOutput: string,
+    modifiedFiles: string[]
+  ): Promise<CodeGenerationResult> {
+    if (!this.client) {
+      return {
+        success: false,
+        files: [],
+        explanation: 'No LLM available for compilation fix',
+        error: 'ANTHROPIC_API_KEY not configured',
+      };
+    }
+
+    // Truncate compiler output to first 10 errors or 4000 chars
+    const errorLines = compilerOutput.split('\n')
+      .filter(line => line.includes('error TS'))
+      .slice(0, 10);
+    const truncatedErrors = errorLines.length > 0
+      ? errorLines.join('\n')
+      : compilerOutput.slice(0, 4000);
+
+    // Build focused fix prompt
+    const fixPrompt = this.buildCompilationFixPrompt(
+      pkg,
+      projectPath,
+      truncatedErrors,
+      modifiedFiles
+    );
+
+    try {
+      console.log('[Worker:CodeGeneration] Calling LLM for compilation fix (i[27])...');
+
+      const response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 4000,
+        tools: [CODE_GENERATION_TOOL],
+        tool_choice: { type: 'any' },
+        messages: [{ role: 'user', content: fixPrompt }],
+      });
+
+      const toolUse = response.content.find(
+        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
+      );
+
+      if (!toolUse || toolUse.name !== 'submit_code_changes') {
+        return {
+          success: false,
+          files: [],
+          explanation: 'LLM did not call the submit_code_changes tool for fix',
+          error: 'NO_TOOL_USE_FOR_FIX',
+        };
+      }
+
+      const input = toolUse.input as {
+        files?: Array<{ path: string; action: string; content?: string; edits?: Array<{ search: string; replace: string }> }>;
+        explanation?: string;
+      };
+
+      console.log(`[Worker:CodeGeneration] Fix generated: ${input.files?.length ?? 0} file(s)`);
+
+      // Filter to only allow changes to files that were modified in the first pass
+      // This prevents the LLM from making unauthorized changes
+      const allowedFiles = new Set(modifiedFiles);
+      const filteredFiles = (input.files ?? []).filter(f => {
+        const isAllowed = allowedFiles.has(f.path);
+        if (!isAllowed) {
+          console.warn(`[Worker:CodeGeneration] Filtered out unauthorized fix to: ${f.path}`);
+        }
+        return isAllowed;
+      });
+
+      return this.validateAndNormalizeParsed(
+        {
+          files: filteredFiles,
+          explanation: input.explanation ?? 'Compilation fix generated',
+        },
+        projectPath
+      );
+
+    } catch (error) {
+      console.error('[Worker:CodeGeneration] Compilation fix LLM call failed:', error);
+      return {
+        success: false,
+        files: [],
+        explanation: 'Compilation fix LLM call failed',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  }
+
+  /**
+   * i[27]: Build a focused prompt for fixing compilation errors.
+   */
+  private buildCompilationFixPrompt(
+    pkg: ContextPackage,
+    projectPath: string,
+    compilerErrors: string,
+    modifiedFiles: string[]
+  ): string {
+    return `You are a code repair assistant. Your ONLY job is to fix the compilation errors below.
+
+## COMPILATION ERRORS
+\`\`\`
+${compilerErrors}
+\`\`\`
+
+## FILES YOU MAY MODIFY
+You may ONLY make changes to these files (the ones touched in the previous pass):
+${modifiedFiles.map(f => `- ${f}`).join('\n')}
+
+## CONSTRAINTS (CRITICAL)
+1. Fix ONLY the specific TypeScript errors shown above
+2. Do NOT refactor unrelated code
+3. Do NOT add new features or functionality
+4. Do NOT modify files not listed above
+5. Use the "edit" action with precise search/replace pairs
+6. The search string must match EXACTLY what's in the file
+
+## TASK CONTEXT (for reference only)
+Original task: ${pkg.task.description}
+Project: ${projectPath}
+
+## ACTION TYPES
+- **edit**: PREFERRED. Provide search/replace pairs for surgical fixes.
+- **modify**: Only if you need to completely rewrite a small file.
+- **create**: Only if an error indicates a missing file (rare).
+
+## EXAMPLE FIX
+If the error is "Property 'foo' does not exist on type 'Bar'", you might:
+\`\`\`json
+{
+  "path": "/path/to/file.ts",
+  "action": "edit",
+  "edits": [
+    {
+      "search": "interface Bar {",
+      "replace": "interface Bar {\\n  foo: string;"
+    }
+  ]
+}
+\`\`\`
+
+Now fix ONLY the compilation errors by calling submit_code_changes:`;
+  }
 }
 
 /**
@@ -993,6 +1154,8 @@ export class ExecutionForeman {
         filesModified: [],
         filesRead: [],
         compilationPassed: false,
+        compilationAttempts: 0, // i[27]
+        compilationSelfHealed: false, // i[27]
         validationPassed: false, // i[18]
         notes: 'Task not found or not prepared',
         error: 'NO_CONTEXT_PACKAGE',
@@ -1019,6 +1182,8 @@ export class ExecutionForeman {
           filesModified: [],
           filesRead: pkg.codeContext.mustRead.map(f => f.path),
           compilationPassed: false,
+          compilationAttempts: 0, // i[27]
+          compilationSelfHealed: false, // i[27]
           validationPassed: false, // i[18]
           notes: codeResult.explanation,
           error: codeResult.error,
@@ -1037,9 +1202,64 @@ export class ExecutionForeman {
         console.warn(`[Foreman:Execution] File operation errors: ${errorMsg}`);
       }
 
-      // Phase 3: Compilation Validation
+      // Phase 3: Compilation Validation (with self-heal loop - i[27])
       console.log('\n[Foreman:Execution] Phase 3: Compilation Validation');
-      const validation = await this.validationWorker.checkCompilation(projectPath);
+      let validation = await this.validationWorker.checkCompilation(projectPath);
+
+      // i[27]: Self-heal loop - if compilation fails, try to fix it
+      const MAX_COMPILATION_FIX_ATTEMPTS = 1;
+      let compilationAttempts = 1;
+      let compilationSelfHealed = false;
+      const allModifiedFiles = [...fileResult.created, ...fileResult.modified, ...fileResult.edited];
+
+      if (!validation.passed && allModifiedFiles.length > 0) {
+        console.log('\n[Foreman:Execution] Phase 3b: Compilation Self-Heal (i[27])');
+        console.log(`[Foreman:Execution] Attempting to fix ${validation.output.split('error TS').length - 1} compilation error(s)...`);
+
+        for (let attempt = 0; attempt < MAX_COMPILATION_FIX_ATTEMPTS && !validation.passed; attempt++) {
+          compilationAttempts++;
+
+          // Generate fix for compilation errors
+          const fixResult = await this.codeWorker.generateWithCompilationFeedback(
+            pkg,
+            projectPath,
+            validation.output,
+            allModifiedFiles
+          );
+
+          if (!fixResult.success || fixResult.files.length === 0) {
+            console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1} failed: ${fixResult.error || 'no fixes generated'}`);
+            break;
+          }
+
+          // Apply the fix
+          console.log(`[Foreman:Execution] Applying ${fixResult.files.length} fix(es)...`);
+          const fixFileResult = await this.fileWorker.apply(fixResult.files);
+
+          if (fixFileResult.errors.length > 0) {
+            console.log(`[Foreman:Execution] Fix file operation errors: ${fixFileResult.errors.map(e => e.error).join('; ')}`);
+            break;
+          }
+
+          // Track additional modifications from self-heal
+          fileResult.modified.push(...fixFileResult.modified);
+          fileResult.edited.push(...fixFileResult.edited);
+
+          // Re-check compilation
+          validation = await this.validationWorker.checkCompilation(projectPath);
+
+          if (validation.passed) {
+            compilationSelfHealed = true;
+            console.log(`[Foreman:Execution] ✓ Self-heal succeeded! Compilation now passes.`);
+          } else {
+            console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1}: compilation still failing`);
+          }
+        }
+
+        if (!validation.passed) {
+          console.log(`[Foreman:Execution] Self-heal exhausted after ${compilationAttempts} attempts`);
+        }
+      }
 
       // Phase 4: Tool Building (i[18] - Hard Problem #5)
       // Generate and run task-specific validation tools
@@ -1118,17 +1338,21 @@ export class ExecutionForeman {
 
       // i[24]: Include edited files in modified count for result
       // i[26]: Include structuredFailure for analytics
+      // i[27]: Include self-heal tracking
       const result: ExecutionResult = {
         success: codeResult.success && fileResult.errors.length === 0 && validation.passed,
         filesCreated: fileResult.created,
         filesModified: [...fileResult.modified, ...fileResult.edited],  // i[24]: edited files are modified
         filesRead: pkg.codeContext.mustRead.map(f => f.path),
         compilationPassed: validation.passed,
+        compilationAttempts, // i[27]: Track self-heal attempts
+        compilationSelfHealed, // i[27]: Did self-heal fix compilation?
         validationPassed, // i[18]
         validationSummary, // i[18]
         notes: [
           codeResult.explanation,
           fileResult.edited.length > 0 ? `Surgical edits applied: ${fileResult.edited.length} file(s)` : '',  // i[24]
+          compilationSelfHealed ? `Compilation self-healed after ${compilationAttempts} attempt(s) (i[27])` : '',  // i[27]
           validation.passed ? 'TypeScript compilation passed' : `Compilation issues: ${validation.output.substring(0, 200)}`,
           validationSummary ? `Tool validation: ${validationSummary.passed}/${validationSummary.totalTools} passed` : '',
         ].filter(Boolean).join('\n'),
@@ -1196,6 +1420,8 @@ export class ExecutionForeman {
         filesModified: [],
         filesRead: pkg.codeContext.mustRead.map(f => f.path),
         compilationPassed: false,
+        compilationAttempts: 0, // i[27]
+        compilationSelfHealed: false, // i[27]
         validationPassed: false, // i[18]
         notes: 'Execution failed with error',
         error: message,
@@ -1264,6 +1490,14 @@ export class ExecutionForeman {
             : `Task had issues: ${result.error || 'Unknown'}`,
           tags: [pkg.projectType, result.success ? 'success' : 'failure'],
         },
+        // i[27]: Add self-heal learning
+        ...(result.compilationAttempts > 1 ? [{
+          type: (result.compilationSelfHealed ? 'insight' : 'warning') as 'insight' | 'warning' | 'correction' | 'pattern',
+          content: result.compilationSelfHealed
+            ? `Compilation self-healed after ${result.compilationAttempts} attempt(s). Self-heal loop (i[27]) recovered from compilation failure.`
+            : `Compilation self-heal failed after ${result.compilationAttempts} attempt(s). Original errors could not be fixed automatically.`,
+          tags: ['self-heal', 'i[27]', result.compilationSelfHealed ? 'self-heal-success' : 'self-heal-failed'],
+        }] : []),
         // i[18]: Add validation learning if tools were run
         ...(testsRan ? [{
           type: (testsPassed ? 'insight' : 'warning') as 'insight' | 'warning' | 'correction' | 'pattern',

@@ -472,6 +472,17 @@ export type ForgeRunResult = z.infer<typeof ForgeRunResult>;
 /**
  * Helper to create a StructuredFailure from common error patterns.
  */
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Format a timestamp as ISO date string (YYYY-MM-DD)
+ */
+export function formatTimestamp(date: Date): string {
+  return date.toISOString().split('T')[0];
+}
+
 export function classifyFailure(
   errorMessage: string,
   phase: FailurePhase,
