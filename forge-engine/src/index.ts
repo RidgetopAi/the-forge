@@ -18,6 +18,7 @@ import { taskManager } from './state.js';
 import { mandrel } from './mandrel.js';
 import { llmClient, type QualityEvaluation } from './llm.js';
 import type { HumanSyncRequest } from './types.js';
+import { createInsightGenerator } from './insights.js';
 
 // ============================================================================
 // Forge Engine
@@ -599,12 +600,55 @@ async function handleStatus(): Promise<void> {
   console.log('─'.repeat(60));
 }
 
+/**
+ * Handle --insights command to analyze accumulated learning
+ *
+ * i[20]: This is the key addition that makes learning ACTUALLY compound.
+ * Instead of just storing feedback, we analyze it for patterns.
+ *
+ * Usage: npx tsx src/index.ts --insights [project-path]
+ */
+async function handleInsights(projectPath?: string): Promise<void> {
+  // Connect to Mandrel
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.error('[Insights] Could not connect to Mandrel.');
+    process.exit(1);
+  }
+
+  const generator = createInsightGenerator('i[20]');
+  const insights = await generator.generateInsights(projectPath);
+  const formatted = generator.formatInsights(insights);
+
+  console.log(formatted);
+
+  // Store the insight analysis to Mandrel
+  await mandrel.storeContext(
+    `Insight Analysis Generated (i[20]):\n` +
+    `Total Executions: ${insights.totalExecutions}\n` +
+    `Success Rate: ${(insights.successRate * 100).toFixed(1)}%\n` +
+    `mustRead Over-Prediction Rate: ${(insights.mustReadAccuracy.overPredictionRate * 100).toFixed(1)}%\n` +
+    `Top Recommendation: ${insights.recommendations[0]?.recommendation ?? 'None'}\n` +
+    `Failure Modes: ${insights.failureModes.map(m => m.mode).join(', ') || 'None identified'}`,
+    'reflections',
+    ['insight-analysis', 'i[20]', 'learning-system']
+  );
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
   // i[19]: Handle --status command to show pending requests
   if (args.includes('--status')) {
     await handleStatus();
+    return;
+  }
+
+  // i[20]: Handle --insights command to analyze accumulated learning
+  const insightsIndex = args.indexOf('--insights');
+  if (insightsIndex !== -1) {
+    const projectPath = args[insightsIndex + 1]; // Optional project path filter
+    await handleInsights(projectPath?.startsWith('--') ? undefined : projectPath);
     return;
   }
 
@@ -626,11 +670,13 @@ async function main() {
   if (args.length < 2) {
     console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
     console.log('       npx tsx src/index.ts --status');
+    console.log('       npx tsx src/index.ts --insights [project-path]');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
     console.log('  --status                     Show pending Human Sync requests');
+    console.log('  --insights [path]            Analyze accumulated learning (i[20])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('');
     console.log('Options:');
@@ -641,6 +687,8 @@ async function main() {
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README" --execute');
     console.log('  npx tsx src/index.ts --status');
+    console.log('  npx tsx src/index.ts --insights');
+    console.log('  npx tsx src/index.ts --insights /workspace/projects/the-forge');
     console.log('  npx tsx src/index.ts --respond abc-123 proceed_careful --notes "I reviewed the risks"');
     process.exit(1);
   }
@@ -648,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[19]: Updated instance ID - adds --status command and robust JSON parsing
-  const engine = new ForgeEngine('i[19]');
+  // i[20]: Updated instance ID - adds --insights command for pattern analysis
+  const engine = new ForgeEngine('i[20]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -698,3 +746,10 @@ export {
   type ValidationResult,
   type ValidationSummary,
 } from './validation-tools.js';
+// i[20]: Insight Generator exports (Hard Problem #3 - Learning System Enhancement)
+export {
+  InsightGenerator,
+  createInsightGenerator,
+  type InsightSummary,
+  type ExecutionFeedbackData,
+} from './insights.js';
