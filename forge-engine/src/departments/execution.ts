@@ -268,17 +268,55 @@ class CodeGenerationWorker {
     console.log(`  Tokens used: ${budgetResult.summary.totalTokensUsed}`);
     console.log(`  Budget remaining: ${budgetResult.summary.budgetRemaining}`);
 
+    // i[32]: CRITICAL FIX for surgical edit mismatch
+    // Root cause (i[31]): LLM receives signatures-only, generates edits expecting full content.
+    // Solution: For HIGH PRIORITY files (mustRead = edit targets), always provide full content.
+    // Context budget is for UNDERSTANDING; edit targets need FULL CONTENT.
+    const mustReadPaths = new Set(pkg.codeContext.mustRead.map(f => f.path));
+
     // Convert budgeted files to the format expected by buildPrompt
     const fileContents: Array<{ path: string; content: string; method?: string }> = [];
+    let fullContentOverrides = 0;
+
     for (const file of budgetResult.files) {
       if (file.content) {
-        fileContents.push({
-          path: file.path,
-          content: file.content,
-          method: file.extractionMethod,
-        });
-        console.log(`[Worker:CodeGeneration] ${file.path}: ${file.extractionMethod} (${file.allocatedTokens} tokens)`);
+        // i[32]: If this is a mustRead file and we only got signatures/truncated,
+        // read the full content so LLM can generate valid search strings
+        const isMustRead = mustReadPaths.has(file.path);
+        const needsFullContent = isMustRead &&
+          (file.extractionMethod === 'signatures' || file.extractionMethod === 'truncated');
+
+        if (needsFullContent) {
+          try {
+            const fullContent = await fs.readFile(file.path, 'utf-8');
+            fileContents.push({
+              path: file.path,
+              content: fullContent,
+              method: 'full-override',
+            });
+            fullContentOverrides++;
+            console.log(`[Worker:CodeGeneration] ${file.path}: ${file.extractionMethod} -> full-override (i[32] fix)`);
+          } catch {
+            fileContents.push({
+              path: file.path,
+              content: file.content,
+              method: file.extractionMethod,
+            });
+            console.warn(`[Worker:CodeGeneration] ${file.path}: failed to read full content, using ${file.extractionMethod}`);
+          }
+        } else {
+          fileContents.push({
+            path: file.path,
+            content: file.content,
+            method: file.extractionMethod,
+          });
+          console.log(`[Worker:CodeGeneration] ${file.path}: ${file.extractionMethod} (${file.allocatedTokens} tokens)`);
+        }
       }
+    }
+
+    if (fullContentOverrides > 0) {
+      console.log(`[Worker:CodeGeneration] i[32] fix: Overrode ${fullContentOverrides} file(s) to full content for surgical edits`);
     }
 
     // Store this last budget result for logging

@@ -468,7 +468,7 @@ async function main() {
     process.exit(1);
   }
   
-  const runner = new BenchmarkRunner('i[31]');
+  const runner = new BenchmarkRunner('i[32]');
   
   if (specificTask !== undefined) {
     const task = BENCHMARK_TASKS.find(t => t.id === specificTask);

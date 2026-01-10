@@ -976,7 +976,8 @@ async function main() {
   const request = requestParts.join(' ');
 
   // i[31]: External benchmark with git reset (observability + ground truth)
-  const engine = new ForgeEngine('i[31]');
+  // i[32]: Fix surgical edit mismatch - provide full content for mustRead files
+  const engine = new ForgeEngine('i[32]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

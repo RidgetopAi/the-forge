@@ -473,6 +473,16 @@ export type ForgeRunResult = z.infer<typeof ForgeRunResult>;
  * Helper to create a StructuredFailure from common error patterns.
  */
 // ============================================================================
+// Benchmark Configuration
+// ============================================================================
+
+export interface BenchmarkConfig {
+  taskCount: number;
+  timeout: number;
+  verbose: boolean;
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
