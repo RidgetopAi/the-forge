@@ -89,6 +89,10 @@ RUN mkdir -p /home/forge/.ssh \
     && chmod 700 /home/forge/.ssh \
     && chown -R forge:forge /home/forge/.ssh
 
+# Setup .local directory for Amp data storage
+RUN mkdir -p /home/forge/.local/share/amp \
+    && chown -R forge:forge /home/forge/.local
+
 # Setup workspace directory
 RUN mkdir -p /workspace \
     && chown -R forge:forge /workspace

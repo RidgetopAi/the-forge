@@ -42,6 +42,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - DATABASE_URL=${DATABASE_URL}
+      - AMP_API_KEY=${AMP_API_KEY}
       # Add more as needed
 
     # Network mode: host gives full network access (simpler for SSH, etc.)
