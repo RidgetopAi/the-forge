@@ -13,9 +13,11 @@
 import { createPlantManager } from './departments/plant-manager.js';
 import { createPreparationForeman } from './departments/preparation.js';
 import { createExecutionForeman } from './departments/execution.js';
+import { createHumanSyncService, type GeneratedQuestion, type HumanSyncService } from './human-sync.js';
 import { taskManager } from './state.js';
 import { mandrel } from './mandrel.js';
 import { llmClient, type QualityEvaluation } from './llm.js';
+import type { HumanSyncRequest } from './types.js';
 
 // ============================================================================
 // Forge Engine
@@ -26,12 +28,14 @@ export class ForgeEngine {
   private plantManager: ReturnType<typeof createPlantManager>;
   private preparationForeman: ReturnType<typeof createPreparationForeman>;
   private executionForeman: ReturnType<typeof createExecutionForeman>;
+  private humanSyncService: HumanSyncService;
 
   constructor(instanceId: string = 'forge-engine') {
     this.instanceId = instanceId;
     this.plantManager = createPlantManager(instanceId);
     this.preparationForeman = createPreparationForeman(instanceId);
     this.executionForeman = createExecutionForeman(instanceId);
+    this.humanSyncService = createHumanSyncService(instanceId);
   }
 
   /**
@@ -63,6 +67,8 @@ export class ForgeEngine {
     };
     needsHumanSync?: boolean;
     humanSyncReason?: string;
+    humanSyncRequest?: HumanSyncRequest;
+    humanSyncQuestion?: GeneratedQuestion;
   }> {
     console.log('═'.repeat(60));
     console.log('THE FORGE - Development Cognition System');
@@ -93,6 +99,43 @@ export class ForgeEngine {
         needsHumanSync: true,
         humanSyncReason: intake.humanSyncReason,
       };
+    }
+
+    // Phase 1.5: Human Sync Check - Pre-Preparation (i[15])
+    console.log('\n' + '─'.repeat(40));
+    console.log('PHASE 1.5: HUMAN SYNC CHECK (i[15])');
+    console.log('─'.repeat(40));
+
+    const preCheckResult = await this.humanSyncService.evaluateTask(intake.taskId, {
+      task: taskManager.getTask(intake.taskId)!,
+      rawRequest,
+    });
+
+    if (preCheckResult.needsSync && preCheckResult.question?.urgency === 'critical') {
+      console.log(`\n[HumanSync] CRITICAL issue detected: ${preCheckResult.question.question}`);
+      console.log(`[HumanSync] Context: ${preCheckResult.question.context}`);
+      console.log('\nOptions:');
+      for (const opt of preCheckResult.question.options) {
+        console.log(`  [${opt.id}] ${opt.label}`);
+        console.log(`      ${opt.description}`);
+      }
+
+      return {
+        success: false,
+        taskId: intake.taskId,
+        stage: 'human-sync-required',
+        needsHumanSync: true,
+        humanSyncReason: preCheckResult.question.question,
+        humanSyncRequest: preCheckResult.request,
+        humanSyncQuestion: preCheckResult.question,
+      };
+    }
+
+    if (preCheckResult.needsSync) {
+      console.log(`[HumanSync] Non-critical issue noted: ${preCheckResult.firedTriggers.map(t => t.trigger.name).join(', ')}`);
+      console.log('[HumanSync] Proceeding to preparation, will evaluate again after.');
+    } else {
+      console.log('[HumanSync] No blocking issues detected.');
     }
 
     // Phase 2: Preparation (Preparation Foreman)
@@ -152,6 +195,50 @@ export class ForgeEngine {
       ['quality-evaluation', 'context-package', qualityEval.passed ? 'passed' : 'needs-improvement']
     );
 
+    // Phase 3.5: Comprehensive Human Sync Check - Pre-Execution (i[15])
+    console.log('\n' + '─'.repeat(40));
+    console.log('PHASE 3.5: HUMAN SYNC - PRE-EXECUTION CHECK (i[15])');
+    console.log('─'.repeat(40));
+
+    const postCheckResult = await this.humanSyncService.evaluateTask(intake.taskId, {
+      task: taskManager.getTask(intake.taskId)!,
+      rawRequest,
+      contextPackage: pkg,
+      qualityScore: qualityEval.score,
+    });
+
+    if (postCheckResult.needsSync) {
+      const triggers = postCheckResult.firedTriggers.map(t => t.trigger.name);
+      console.log(`[HumanSync] Triggers fired: ${triggers.join(', ')}`);
+
+      if (postCheckResult.question) {
+        console.log(`\n[HumanSync] ${postCheckResult.question.urgency.toUpperCase()}: ${postCheckResult.question.question}`);
+        console.log(`[HumanSync] Context: ${postCheckResult.question.context.slice(0, 200)}...`);
+        console.log('\nOptions:');
+        for (const opt of postCheckResult.question.options) {
+          console.log(`  [${opt.id}] ${opt.label}`);
+          console.log(`      ${opt.description}`);
+        }
+      }
+
+      // For critical or high urgency, block execution
+      if (postCheckResult.question?.urgency === 'critical' || postCheckResult.question?.urgency === 'high') {
+        return {
+          success: true,
+          taskId: intake.taskId,
+          stage: 'prepared',
+          result: pkg,
+          qualityEvaluation: qualityEval,
+          needsHumanSync: true,
+          humanSyncReason: postCheckResult.question?.question ?? 'Human sync required before execution',
+          humanSyncRequest: postCheckResult.request,
+          humanSyncQuestion: postCheckResult.question,
+        };
+      }
+    } else {
+      console.log('[HumanSync] All triggers passed. Ready for execution.');
+    }
+
     // Success - ContextPackage ready
     console.log('\n' + '─'.repeat(40));
     console.log('RESULT: ContextPackage Ready');
@@ -160,9 +247,9 @@ export class ForgeEngine {
     console.log('\nTask Summary:');
     console.log(taskManager.getTaskSummary(intake.taskId));
 
-    // Check if human sync needed before execution
+    // Check legacy humanSync flags (for backward compatibility)
     if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0) {
-      console.log('\n⚠️  Human Sync Required Before Execution:');
+      console.log('\n[Legacy HumanSync] Additional items from ContextPackage:');
       for (const action of pkg.humanSync.requiredBefore) {
         console.log(`  - Before: ${action}`);
       }
@@ -202,20 +289,6 @@ export class ForgeEngine {
     }, null, 2));
     console.log('');
     console.log(`Then run: cd ${forgeEnginePath} && npx tsx src/report.ts --json report.json`);
-
-    if (pkg.humanSync.requiredBefore.length > 0 || pkg.humanSync.ambiguities.length > 0 || !qualityEval.passed) {
-      return {
-        success: true,
-        taskId: intake.taskId,
-        stage: 'prepared',
-        result: pkg,
-        qualityEvaluation: qualityEval,
-        needsHumanSync: true,
-        humanSyncReason: !qualityEval.passed
-          ? `ContextPackage quality score ${qualityEval.score}/100 below threshold. Review issues before execution.`
-          : 'Ambiguities or risks identified. Review ContextPackage before execution.',
-      };
-    }
 
     // Phase 4: Execution (NEW - i[13])
     // Only execute if explicitly requested
@@ -297,8 +370,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[14]: Fixed Learning System - two-phase retrieval now returns actual results!
-  const engine = new ForgeEngine('i[14]');
+  // i[15]: Added Human Sync Protocol - active trigger detection and question generation
+  const engine = new ForgeEngine('i[15]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -317,3 +390,4 @@ export { createQualityGate, QualityGate } from './departments/quality-gate.js';
 export { createExecutionForeman, ExecutionForeman } from './departments/execution.js';
 export { reportExecution } from './report.js';
 export { llmClient, createLLMClient, type ClassificationResult, type QualityEvaluation } from './llm.js';
+export { createHumanSyncService, HumanSyncService, builtInTriggers, type GeneratedQuestion } from './human-sync.js';
