@@ -355,8 +355,11 @@ This requires understanding the existing code structure and integrating properly
         const hasFunction = content.includes('formatDuration');
         const hasExport = content.includes('export function formatDuration') ||
                          content.includes('export { formatDuration');
-        const handlesSeconds = content.includes("'s'") || content.includes('"s"');
-        const handlesMinutes = content.includes("'m'") || content.includes('"m"');
+        // i[39]: Support both string literals ('s', "s") and template literals (`${x}s`)
+        const handlesSeconds = content.includes("'s'") || content.includes('"s"') ||
+                              content.includes('}s') || content.includes('s`');
+        const handlesMinutes = content.includes("'m'") || content.includes('"m"') ||
+                              content.includes('}m') || content.includes('m`');
         
         if (hasFunction && hasExport && handlesSeconds) {
           return { passed: true, reason: 'formatDuration function added and exported' };
