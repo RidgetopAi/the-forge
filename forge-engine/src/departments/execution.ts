@@ -3,6 +3,7 @@
  *
  * i[13] contribution: The department that actually DOES the work.
  * i[16] enhancement: Context Budget Manager integration
+ * i[18] enhancement: Tool Building integration for task-specific validation
  *
  * After 12 passes refining Preparation, this closes the loop.
  * The Forge can now prepare AND execute tasks.
@@ -13,11 +14,16 @@
  * - Signature extraction for large files
  * - Smart truncation preserving structural boundaries
  *
+ * i[18] addition: Tool Building - generates and runs task-specific validation
+ * tools. This solves Hard Problem #5 and closes the feedback loop properly.
+ * Instead of just "does it compile", we can now ask "does it work".
+ *
  * Structure:
  * - ExecutionForeman (Sonnet-tier): Orchestrates execution, manages workers
  * - CodeGenerationWorker (LLM): Generates code from ContextPackage
  * - FileOperationWorker: Creates/modifies files
  * - ValidationWorker: Runs TypeScript compilation, basic checks
+ * - ValidationToolBuilder (i[18]): Generates and runs task-specific tests
  *
  * Key insight from seed document: "Preparation IS the product. If prep is right,
  * execution is almost mechanical." This department tests that hypothesis.
@@ -27,6 +33,11 @@ import { ContextPackage, ExecutionFeedback } from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
 import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
+import {
+  createValidationToolBuilder,
+  ValidationToolBuilder,
+  type ValidationSummary,
+} from '../validation-tools.js';
 import Anthropic from '@anthropic-ai/sdk';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -45,6 +56,8 @@ interface ExecutionResult {
   filesModified: string[];
   filesRead: string[];
   compilationPassed: boolean;
+  validationPassed: boolean; // i[18]: Tool Building result
+  validationSummary?: ValidationSummary; // i[18]: Detailed validation results
   notes: string;
   error?: string;
 }
@@ -458,12 +471,14 @@ export class ExecutionForeman {
   private codeWorker: CodeGenerationWorker;
   private fileWorker: FileOperationWorker;
   private validationWorker: ValidationWorker;
+  private toolBuilder: ValidationToolBuilder; // i[18]: Tool Building
 
   constructor(instanceId: string) {
     this.instanceId = instanceId;
     this.codeWorker = new CodeGenerationWorker();
     this.fileWorker = new FileOperationWorker();
     this.validationWorker = new ValidationWorker();
+    this.toolBuilder = createValidationToolBuilder(instanceId); // i[18]
   }
 
   /**
@@ -483,6 +498,7 @@ export class ExecutionForeman {
         filesModified: [],
         filesRead: [],
         compilationPassed: false,
+        validationPassed: false, // i[18]
         notes: 'Task not found or not prepared',
         error: 'NO_CONTEXT_PACKAGE',
       };
@@ -508,6 +524,7 @@ export class ExecutionForeman {
           filesModified: [],
           filesRead: pkg.codeContext.mustRead.map(f => f.path),
           compilationPassed: false,
+          validationPassed: false, // i[18]
           notes: codeResult.explanation,
           error: codeResult.error,
         };
@@ -525,9 +542,39 @@ export class ExecutionForeman {
         console.warn(`[Foreman:Execution] File operation errors: ${errorMsg}`);
       }
 
-      // Phase 3: Validation
-      console.log('\n[Foreman:Execution] Phase 3: Validation');
+      // Phase 3: Compilation Validation
+      console.log('\n[Foreman:Execution] Phase 3: Compilation Validation');
       const validation = await this.validationWorker.checkCompilation(projectPath);
+
+      // Phase 4: Tool Building (i[18] - Hard Problem #5)
+      // Generate and run task-specific validation tools
+      console.log('\n[Foreman:Execution] Phase 4: Tool Building (i[18])');
+      let validationSummary: ValidationSummary | undefined;
+      let validationPassed = true;
+
+      try {
+        const allFiles = [...fileResult.created, ...fileResult.modified];
+        if (allFiles.length > 0) {
+          const tools = await this.toolBuilder.buildTools(
+            pkg,
+            projectPath,
+            fileResult.created,
+            fileResult.modified
+          );
+
+          if (tools.length > 0) {
+            validationSummary = await this.toolBuilder.runTools(tools, projectPath);
+            validationPassed = validationSummary.overallPassed;
+
+            console.log(`[Foreman:Execution] Tool Building: ${validationSummary.passed}/${validationSummary.totalTools} validations passed`);
+          } else {
+            console.log('[Foreman:Execution] No validation tools generated');
+          }
+        }
+      } catch (toolError) {
+        console.warn('[Foreman:Execution] Tool Building error (non-fatal):', toolError);
+        // Tool Building failures are non-fatal - we still have compilation check
+      }
 
       // Build result
       const result: ExecutionResult = {
@@ -536,10 +583,13 @@ export class ExecutionForeman {
         filesModified: fileResult.modified,
         filesRead: pkg.codeContext.mustRead.map(f => f.path),
         compilationPassed: validation.passed,
+        validationPassed, // i[18]
+        validationSummary, // i[18]
         notes: [
           codeResult.explanation,
           validation.passed ? 'TypeScript compilation passed' : `Compilation issues: ${validation.output.substring(0, 200)}`,
-        ].join('\n'),
+          validationSummary ? `Tool validation: ${validationSummary.passed}/${validationSummary.totalTools} passed` : '',
+        ].filter(Boolean).join('\n'),
       };
 
       // Set execution result on task
@@ -547,7 +597,7 @@ export class ExecutionForeman {
         success: result.success,
         filesCreated: result.filesCreated,
         filesModified: result.filesModified,
-        testsPassed: undefined, // TODO: Add test running
+        testsPassed: validationPassed, // i[18]: Now set from Tool Building
         notes: result.notes,
       });
 
@@ -558,16 +608,17 @@ export class ExecutionForeman {
         taskManager.transitionState(taskId, 'blocked', this.instanceId, 'Execution had issues');
       }
 
-      // Store to Mandrel
+      // Store to Mandrel (i[18]: now includes validation results)
       await mandrel.storeContext(
         `Execution complete for task ${taskId}:\n` +
         `Success: ${result.success}\n` +
         `Files Created: ${result.filesCreated.join(', ') || 'none'}\n` +
         `Files Modified: ${result.filesModified.join(', ') || 'none'}\n` +
         `Compilation: ${result.compilationPassed ? 'PASSED' : 'FAILED'}\n` +
+        `Validation: ${result.validationPassed ? 'PASSED' : 'FAILED'}${validationSummary ? ` (${validationSummary.passed}/${validationSummary.totalTools} tools passed)` : ''}\n` +
         `Notes: ${result.notes}`,
         result.success ? 'completion' : 'error',
-        ['execution', result.success ? 'success' : 'failed', this.instanceId]
+        ['execution', result.success ? 'success' : 'failed', this.instanceId, 'tool-building']
       );
 
       console.log(`\n[Foreman:Execution] Complete: ${result.success ? 'SUCCESS' : 'ISSUES FOUND'}`);
@@ -585,6 +636,7 @@ export class ExecutionForeman {
         filesModified: [],
         filesRead: pkg.codeContext.mustRead.map(f => f.path),
         compilationPassed: false,
+        validationPassed: false, // i[18]
         notes: 'Execution failed with error',
         error: message,
       };
@@ -612,6 +664,10 @@ export class ExecutionForeman {
     const missed = result.filesRead.filter(f => !predicted.includes(f));
     const unnecessary = predicted.filter(f => !result.filesRead.includes(f));
 
+    // i[18]: Determine if tests were actually run (Tool Building)
+    const testsRan = result.validationSummary !== undefined && result.validationSummary.totalTools > 0;
+    const testsPassed = result.validationPassed;
+
     const feedback: ExecutionFeedback = {
       id: crypto.randomUUID(),
       taskId,
@@ -623,7 +679,8 @@ export class ExecutionForeman {
         success: result.success,
         filesActuallyModified: [...result.filesCreated, ...result.filesModified],
         filesActuallyRead: result.filesRead,
-        testsRan: false, // TODO
+        testsRan, // i[18]: Now from Tool Building
+        testsPassed, // i[18]: Now from Tool Building
         compilationPassed: result.compilationPassed,
       },
 
@@ -646,6 +703,12 @@ export class ExecutionForeman {
             : `Task had issues: ${result.error || 'Unknown'}`,
           tags: [pkg.projectType, result.success ? 'success' : 'failure'],
         },
+        // i[18]: Add validation learning if tools were run
+        ...(testsRan ? [{
+          type: (testsPassed ? 'insight' : 'warning') as 'insight' | 'warning' | 'correction' | 'pattern',
+          content: `Tool Building validation: ${result.validationSummary!.passed}/${result.validationSummary!.totalTools} tools passed.`,
+          tags: ['tool-building', testsPassed ? 'validation-passed' : 'validation-failed'],
+        }] : []),
       ],
     };
 

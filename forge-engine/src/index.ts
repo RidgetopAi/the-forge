@@ -549,8 +549,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[17]: Updated instance ID - closes the Human Sync loop
-  const engine = new ForgeEngine('i[17]');
+  // i[18]: Updated instance ID - implements Tool Building (Hard Problem #5)
+  const engine = new ForgeEngine('i[18]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -591,3 +591,11 @@ export {
   type BudgetedFile,
   type ExtractedContent,
 } from './context-budget.js';
+// i[18]: Validation Tool Builder exports (Hard Problem #5 - Tool Building)
+export {
+  ValidationToolBuilder,
+  createValidationToolBuilder,
+  type ValidationTool,
+  type ValidationResult,
+  type ValidationSummary,
+} from './validation-tools.js';
