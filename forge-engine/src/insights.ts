@@ -100,6 +100,20 @@ export interface InsightSummary {
     successRate: number;
     avgUnnecessaryFiles: number;
   }>;
+
+  // i[29]: Compilation failure breakdown for debugging
+  compilationFailureDetail?: {
+    totalCompilationFailures: number;
+    byErrorType: Array<{
+      type: string;  // e.g., 'module_not_found', 'type_error', 'import_error'
+      count: number;
+      percentage: number;
+    }>;
+    mostAffectedFiles: Array<{
+      path: string;
+      failureCount: number;
+    }>;
+  };
 }
 
 // ============================================================================
@@ -150,7 +164,77 @@ export class InsightGenerator {
     // Step 6: Compute per-executor stats
     summary.byExecutor = this.computeByExecutor(feedbackData);
 
+    // Step 7 (i[29]): Compute compilation failure breakdown if relevant
+    summary.compilationFailureDetail = this.computeCompilationFailureDetail(feedbackData);
+
     return summary;
+  }
+
+  /**
+   * i[29]: Compute detailed breakdown of compilation failures.
+   * This helps identify patterns like:
+   * - What types of TS errors occur most?
+   * - Which files fail most often?
+   */
+  private computeCompilationFailureDetail(data: ExecutionFeedbackData[]): InsightSummary['compilationFailureDetail'] {
+    const compilationFailures = data.filter(
+      d => !d.outcome.compilationPassed || 
+           (d.structuredFailure?.phase === 'compilation')
+    );
+
+    if (compilationFailures.length === 0) return undefined;
+
+    // Count by error type
+    const byType: Record<string, number> = {};
+    const affectedFiles: Record<string, number> = {};
+
+    for (const f of compilationFailures) {
+      // Extract error type from structured failure
+      if (f.structuredFailure?.phase === 'compilation') {
+        const type = f.structuredFailure.code;
+        byType[type] = (byType[type] || 0) + 1;
+      } else {
+        // Fallback: try to extract from learnings
+        const errorLearning = f.learnings.find(l => 
+          l.content.includes('TypeScript error') || 
+          l.content.includes('error TS')
+        );
+        if (errorLearning) {
+          // Extract error code pattern like "TS2307" or "TS2345"
+          const tsMatch = errorLearning.content.match(/error TS(\d{4})/);
+          if (tsMatch) {
+            const code = `ts_${tsMatch[1]}`;
+            byType[code] = (byType[code] || 0) + 1;
+          } else {
+            byType['unknown_ts_error'] = (byType['unknown_ts_error'] || 0) + 1;
+          }
+        } else {
+          byType['unknown_compilation'] = (byType['unknown_compilation'] || 0) + 1;
+        }
+      }
+
+      // Track affected files
+      for (const file of f.outcome.filesActuallyModified) {
+        affectedFiles[file] = (affectedFiles[file] || 0) + 1;
+      }
+    }
+
+    const total = compilationFailures.length;
+
+    return {
+      totalCompilationFailures: total,
+      byErrorType: Object.entries(byType)
+        .map(([type, count]) => ({
+          type,
+          count,
+          percentage: count / total,
+        }))
+        .sort((a, b) => b.count - a.count),
+      mostAffectedFiles: Object.entries(affectedFiles)
+        .map(([path, failureCount]) => ({ path, failureCount }))
+        .sort((a, b) => b.failureCount - a.failureCount)
+        .slice(0, 5),
+    };
   }
 
   /**
@@ -652,6 +736,30 @@ export class InsightGenerator {
       lines.push('─'.repeat(40));
       for (const mode of insights.failureModes) {
         lines.push(`  ${mode.mode.replace(/_/g, ' ')}: ${mode.count} (${(mode.percentage * 100).toFixed(0)}%)`);
+      }
+    }
+
+    // i[29]: Compilation Failure Detail
+    if (insights.compilationFailureDetail && insights.compilationFailureDetail.totalCompilationFailures > 0) {
+      const detail = insights.compilationFailureDetail;
+      lines.push('\n' + '─'.repeat(40));
+      lines.push('COMPILATION FAILURE BREAKDOWN (i[29])');
+      lines.push('─'.repeat(40));
+      lines.push(`Total Compilation Failures: ${detail.totalCompilationFailures}`);
+      
+      if (detail.byErrorType.length > 0) {
+        lines.push('\nBy Error Type:');
+        for (const err of detail.byErrorType.slice(0, 5)) {
+          lines.push(`  ${err.type}: ${err.count} (${(err.percentage * 100).toFixed(0)}%)`);
+        }
+      }
+
+      if (detail.mostAffectedFiles.length > 0) {
+        lines.push('\nMost Affected Files:');
+        for (const file of detail.mostAffectedFiles) {
+          const shortPath = file.path.split('/').slice(-2).join('/');
+          lines.push(`  .../${shortPath}: ${file.failureCount} failure(s)`);
+        }
       }
     }
 

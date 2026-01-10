@@ -20,6 +20,15 @@ import { llmClient, type QualityEvaluation } from './llm.js';
 import type { HumanSyncRequest } from './types.js';
 import { createInsightGenerator } from './insights.js';
 import { handleSelfImprove, createSelfImprovementDriver, SelfImprovementDriver } from './self-improve.js';
+import {
+  createExecutionTracer,
+  ExecutionTracer,
+  getTraceByTaskId,
+  getRecentTraces,
+  formatTrace,
+  type ExecutionTrace,
+  type TraceStepName,
+} from './tracing.js';
 
 // ============================================================================
 // Forge Engine
@@ -71,6 +80,7 @@ export class ForgeEngine {
     humanSyncReason?: string;
     humanSyncRequest?: HumanSyncRequest;
     humanSyncQuestion?: GeneratedQuestion;
+    trace?: ExecutionTrace;
   }> {
     console.log('═'.repeat(60));
     console.log('THE FORGE - Development Cognition System');
@@ -86,20 +96,37 @@ export class ForgeEngine {
       console.log('[ForgeEngine] Connected to Mandrel');
     }
 
+    // i[29]: Initialize execution tracer for observability
+    let tracer: ExecutionTracer | null = null;
+
     // Phase 1: Intake (Plant Manager)
     console.log('\n' + '─'.repeat(40));
     console.log('PHASE 1: INTAKE (Plant Manager)');
     console.log('─'.repeat(40));
 
+    const intakeStart = Date.now();
     const intake = await this.plantManager.intake(rawRequest);
+    const intakeDuration = Date.now() - intakeStart;
+
+    // i[29]: Create tracer after we have taskId
+    tracer = createExecutionTracer(intake.taskId, projectPath, rawRequest, this.instanceId);
+    tracer.recordStep('intake', 'success', intakeDuration, {
+      projectType: intake.classification?.projectType,
+      scope: intake.classification?.scope,
+      confidence: intake.classification?.confidence,
+    });
 
     if (intake.needsHumanSync) {
+      tracer.recordStep('classification', 'failure', 0, undefined, 'needs_human_sync');
+      tracer.finalize('failure');
+      await tracer.storeToMandrel();
       return {
         success: false,
         taskId: intake.taskId,
         stage: 'classification',
         needsHumanSync: true,
         humanSyncReason: intake.humanSyncReason,
+        trace: tracer.getTrace(),
       };
     }
 
@@ -108,6 +135,7 @@ export class ForgeEngine {
     console.log('PHASE 1.5: HUMAN SYNC CHECK (i[15])');
     console.log('─'.repeat(40));
 
+    tracer.startStep('human_sync_pre');
     const preCheckResult = await this.humanSyncService.evaluateTask(intake.taskId, {
       task: taskManager.getTask(intake.taskId)!,
       rawRequest,
@@ -122,6 +150,9 @@ export class ForgeEngine {
         console.log(`      ${opt.description}`);
       }
 
+      tracer.endStep('failure', { urgency: 'critical' }, preCheckResult.question.question);
+      tracer.finalize('failure');
+      await tracer.storeToMandrel();
       return {
         success: false,
         taskId: intake.taskId,
@@ -130,8 +161,10 @@ export class ForgeEngine {
         humanSyncReason: preCheckResult.question.question,
         humanSyncRequest: preCheckResult.request,
         humanSyncQuestion: preCheckResult.question,
+        trace: tracer.getTrace(),
       };
     }
+    tracer.endStep('success', { triggersCount: preCheckResult.firedTriggers.length });
 
     if (preCheckResult.needsSync) {
       console.log(`[HumanSync] Non-critical issue noted: ${preCheckResult.firedTriggers.map(t => t.trigger.name).join(', ')}`);
@@ -145,24 +178,35 @@ export class ForgeEngine {
     console.log('PHASE 2: PREPARATION (Foreman + Workers)');
     console.log('─'.repeat(40));
 
+    tracer.startStep('preparation');
     const preparation = await this.preparationForeman.prepare(intake.taskId, projectPath);
 
     if (!preparation.success) {
+      tracer.endStep('failure', undefined, preparation.error);
+      tracer.finalize('failure');
+      await tracer.storeToMandrel();
       return {
         success: false,
         taskId: intake.taskId,
         stage: 'preparation',
         result: { error: preparation.error },
+        trace: tracer.getTrace(),
       };
     }
+    tracer.endStep('success', { mustReadFiles: preparation.package?.codeContext.mustRead.length });
 
     // Phase 3: Quality Evaluation (NEW - i[7])
     console.log('\n' + '─'.repeat(40));
     console.log('PHASE 3: PREPARATION QUALITY EVALUATION (i[7])');
     console.log('─'.repeat(40));
 
+    tracer.startStep('quality_evaluation');
     const pkg = preparation.package!;
     const qualityEval = await llmClient.evaluateContextPackage(pkg, projectPath);
+    tracer.endStep(qualityEval.passed ? 'success' : 'failure', {
+      score: qualityEval.score,
+      issueCount: qualityEval.issues.length,
+    });
 
     console.log(`\n[Quality Evaluation] Method: ${qualityEval.method}`);
     console.log(`[Quality Evaluation] Score: ${qualityEval.score}/100`);
@@ -202,6 +246,7 @@ export class ForgeEngine {
     console.log('PHASE 3.5: HUMAN SYNC - PRE-EXECUTION CHECK (i[15])');
     console.log('─'.repeat(40));
 
+    tracer.startStep('human_sync_post');
     const postCheckResult = await this.humanSyncService.evaluateTask(intake.taskId, {
       task: taskManager.getTask(intake.taskId)!,
       rawRequest,
@@ -225,6 +270,9 @@ export class ForgeEngine {
 
       // For critical or high urgency, block execution
       if (postCheckResult.question?.urgency === 'critical' || postCheckResult.question?.urgency === 'high') {
+        tracer.endStep('failure', { urgency: postCheckResult.question.urgency }, 'blocked_pre_execution');
+        tracer.finalize('failure');
+        await tracer.storeToMandrel();
         return {
           success: true,
           taskId: intake.taskId,
@@ -235,11 +283,13 @@ export class ForgeEngine {
           humanSyncReason: postCheckResult.question?.question ?? 'Human sync required before execution',
           humanSyncRequest: postCheckResult.request,
           humanSyncQuestion: postCheckResult.question,
+          trace: tracer.getTrace(),
         };
       }
     } else {
       console.log('[HumanSync] All triggers passed. Ready for execution.');
     }
+    tracer.endStep('success');
 
     // Success - ContextPackage ready
     console.log('\n' + '─'.repeat(40));
@@ -299,7 +349,48 @@ export class ForgeEngine {
       console.log('PHASE 4: EXECUTION (i[13])');
       console.log('─'.repeat(40));
 
+      // i[29]: Track execution phases in tracer
+      tracer.startStep('code_generation');
       const execResult = await this.executionForeman.execute(intake.taskId, projectPath);
+      
+      // i[29]: Record execution sub-steps from result
+      // Note: detailed sub-step timing is in execution.ts, here we record high-level
+      if (execResult.compilationAttempts > 1) {
+        tracer.endStep('success', { selfHealAttempts: execResult.compilationAttempts });
+        tracer.recordStep(
+          'compilation_self_heal',
+          execResult.compilationSelfHealed ? 'success' : 'failure',
+          0,
+          { attempts: execResult.compilationAttempts, healed: execResult.compilationSelfHealed }
+        );
+      } else {
+        tracer.endStep(execResult.success ? 'success' : 'failure', {
+          filesCreated: execResult.filesCreated.length,
+          filesModified: execResult.filesModified.length,
+        }, execResult.error);
+      }
+
+      // Record compilation step
+      tracer.recordStep(
+        'compilation',
+        execResult.compilationPassed ? 'success' : 'failure',
+        0,
+        { passed: execResult.compilationPassed },
+        execResult.compilationPassed ? undefined : execResult.notes.substring(0, 100)
+      );
+
+      // Record validation step if it ran
+      if (execResult.validationSummary) {
+        tracer.recordStep(
+          'validation',
+          execResult.validationPassed ? 'success' : 'failure',
+          0,
+          {
+            toolsPassed: execResult.validationSummary.passed,
+            toolsTotal: execResult.validationSummary.totalTools,
+          }
+        );
+      }
 
       console.log(`\n[Execution] Success: ${execResult.success}`);
       console.log(`[Execution] Files Created: ${execResult.filesCreated.join(', ') || 'none'}`);
@@ -308,6 +399,15 @@ export class ForgeEngine {
 
       // Generate feedback for learning loop
       await this.executionForeman.generateFeedback(intake.taskId, execResult);
+
+      // i[29]: Finalize and store trace
+      const trace = tracer.finalize(
+        execResult.success ? 'success' : 'failure',
+        execResult.structuredFailure
+      );
+      await tracer.storeToMandrel();
+
+      console.log(`\n[Trace] Stored trace ${trace.traceId.slice(0, 8)}... (${trace.steps.length} steps, ${trace.totalDurationMs}ms)`);
 
       return {
         success: execResult.success,
@@ -322,16 +422,22 @@ export class ForgeEngine {
           compilationPassed: execResult.compilationPassed,
           notes: execResult.notes,
         },
+        trace,
       };
     }
 
     // Preparation only (no execution)
+    // i[29]: Still finalize trace for prep-only runs
+    const trace = tracer.finalize('success');
+    await tracer.storeToMandrel();
+
     return {
       success: true,
       taskId: intake.taskId,
       stage: 'prepared',
       result: pkg,
       qualityEvaluation: qualityEval,
+      trace,
     };
   }
 
@@ -636,6 +742,130 @@ async function handleInsights(projectPath?: string): Promise<void> {
   );
 }
 
+/**
+ * Handle --replay command for debugging failed executions
+ *
+ * i[29]: Observability First - makes failures explainable and replayable.
+ * Fetches a trace by task ID and displays detailed step-by-step info.
+ *
+ * Usage: npx tsx src/index.ts --replay <task-id>
+ */
+async function handleReplay(args: string[]): Promise<void> {
+  const taskId = args[0];
+
+  if (!taskId) {
+    console.log('Usage: npx tsx src/index.ts --replay <task-id>');
+    console.log('');
+    console.log('Retrieves and displays the execution trace for a task.');
+    console.log('Use --traces to list recent traces with their task IDs.');
+    process.exit(1);
+  }
+
+  // Connect to Mandrel
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.error('[Replay] Could not connect to Mandrel.');
+    process.exit(1);
+  }
+
+  console.log(`[Replay] Searching for trace of task ${taskId.slice(0, 8)}...`);
+
+  const trace = await getTraceByTaskId(taskId);
+
+  if (!trace) {
+    console.error(`[Replay] No trace found for task ${taskId}`);
+    console.log('\nTips:');
+    console.log('  - Make sure the task ID is correct');
+    console.log('  - The task must have been run with tracing enabled (i[29]+)');
+    console.log('  - Use --traces to list recent traces');
+    process.exit(1);
+  }
+
+  console.log(formatTrace(trace));
+
+  // If the trace has a structured failure, provide diagnostic hints
+  if (trace.structuredFailure) {
+    console.log('\n' + '─'.repeat(40));
+    console.log('DIAGNOSTIC HINTS');
+    console.log('─'.repeat(40));
+
+    const sf = trace.structuredFailure;
+    if (sf.phase === 'compilation') {
+      console.log('  This was a compilation failure.');
+      console.log('  Check: Were imports correct? Were types compatible?');
+      if (sf.code === 'compile_module_not_found') {
+        console.log('  → Missing module: Check if dependencies are installed');
+      } else if (sf.code === 'compile_type_error') {
+        console.log('  → Type error: Review the generated code for type mismatches');
+      }
+    } else if (sf.phase === 'file_operation') {
+      console.log('  This was a file operation failure.');
+      if (sf.code === 'file_edit_no_match') {
+        console.log('  → Search string not found: The LLM provided a search pattern');
+        console.log('    that does not exist in the file. This often happens when');
+        console.log('    the LLM only sees signatures (from context budget) not full content.');
+      }
+    }
+
+    if (sf.suggestedFix) {
+      console.log(`\n  Suggested Fix: ${sf.suggestedFix}`);
+    }
+  }
+
+  // Offer to re-run the task
+  console.log('\n' + '─'.repeat(40));
+  console.log('TO RE-RUN THIS TASK');
+  console.log('─'.repeat(40));
+  console.log(`  npx tsx src/index.ts "${trace.projectPath}" "${trace.taskDescription}" --execute`);
+}
+
+/**
+ * Handle --traces command to list recent execution traces
+ *
+ * i[29]: Quick overview of recent runs for debugging
+ */
+async function handleTraces(): Promise<void> {
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.error('[Traces] Could not connect to Mandrel.');
+    process.exit(1);
+  }
+
+  console.log('[Traces] Fetching recent execution traces...\n');
+
+  const traces = await getRecentTraces(15);
+
+  if (traces.length === 0) {
+    console.log('No execution traces found.');
+    console.log('Traces are generated when running tasks with i[29]+ versions.');
+    return;
+  }
+
+  console.log('═'.repeat(60));
+  console.log('RECENT EXECUTION TRACES');
+  console.log('═'.repeat(60));
+
+  for (const trace of traces) {
+    const icon = trace.outcome === 'success' ? '✓' : '✗';
+    const duration = trace.totalDurationMs ? `${trace.totalDurationMs}ms` : 'N/A';
+    const failedStep = trace.summary?.failedStep ? ` (failed at: ${trace.summary.failedStep})` : '';
+
+    console.log(`\n${icon} ${trace.taskId.slice(0, 8)}...  [${trace.outcome.toUpperCase()}]  ${duration}${failedStep}`);
+    console.log(`    Task: ${trace.taskDescription.slice(0, 60)}...`);
+    console.log(`    Instance: ${trace.instanceId}`);
+    console.log(`    Steps: ${trace.summary?.successCount ?? 0}/${trace.summary?.stepCount ?? 0} succeeded`);
+
+    if (trace.structuredFailure) {
+      console.log(`    Failure: ${trace.structuredFailure.phase}/${trace.structuredFailure.code}`);
+    }
+  }
+
+  console.log('\n' + '═'.repeat(60));
+  console.log(`Total: ${traces.length} trace(s)`);
+  console.log('\nTo view details: npx tsx src/index.ts --replay <task-id>');
+  console.log('═'.repeat(60));
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -669,6 +899,20 @@ async function main() {
     return;
   }
 
+  // i[29]: Handle --replay command for debugging failed executions
+  const replayIndex = args.indexOf('--replay');
+  if (replayIndex !== -1) {
+    const replayArgs = args.slice(replayIndex + 1);
+    await handleReplay(replayArgs);
+    return;
+  }
+
+  // i[29]: Handle --traces command to list recent traces
+  if (args.includes('--traces')) {
+    await handleTraces();
+    return;
+  }
+
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
   const shouldExecute = executeIndex !== -1;
@@ -682,6 +926,8 @@ async function main() {
     console.log('       npx tsx src/index.ts --insights [project-path]');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
     console.log('       npx tsx src/index.ts --self-improve <project-path> [--dry-run] [--max-tasks N]');
+    console.log('       npx tsx src/index.ts --traces');
+    console.log('       npx tsx src/index.ts --replay <task-id>');
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
@@ -689,6 +935,8 @@ async function main() {
     console.log('  --insights [path]            Analyze accumulated learning (i[21])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('  --self-improve <path>        Run self-improvement cycle (i[28])');
+    console.log('  --traces                     List recent execution traces (i[29])');
+    console.log('  --replay <task-id>           Debug a failed execution (i[29])');
     console.log('');
     console.log('Options:');
     console.log('  --execute     Actually execute the task (default: prepare only)');
@@ -705,14 +953,16 @@ async function main() {
     console.log('  npx tsx src/index.ts --respond abc-123 proceed_careful --notes "I reviewed the risks"');
     console.log('  npx tsx src/index.ts --self-improve /workspace/projects/the-forge/forge-engine');
     console.log('  npx tsx src/index.ts --self-improve /workspace/projects/the-forge/forge-engine --dry-run');
+    console.log('  npx tsx src/index.ts --traces');
+    console.log('  npx tsx src/index.ts --replay abc-123-def-456');
     process.exit(1);
   }
 
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[28]: Self-improvement driver
-  const engine = new ForgeEngine('i[28]');
+  // i[29]: Observability first
+  const engine = new ForgeEngine('i[29]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -774,3 +1024,16 @@ export {
   createSelfImprovementDriver,
   handleSelfImprove,
 } from './self-improve.js';
+// i[29]: Execution Tracing exports (Observability First)
+export {
+  ExecutionTracer,
+  createExecutionTracer,
+  getTraceByTaskId,
+  getRecentTraces,
+  formatTrace,
+  type ExecutionTrace,
+  type TraceStep,
+  type TraceSummary,
+  type TraceStepName,
+  type TraceStepStatus,
+} from './tracing.js';

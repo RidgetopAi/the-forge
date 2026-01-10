@@ -483,6 +483,16 @@ export function formatTimestamp(date: Date): string {
   return date.toISOString().split('T')[0];
 }
 
+/**
+ * Simple greeting function
+ * 
+ * @param name - The name to greet
+ * @returns A greeting message
+ */
+export function greetUser(name: string): string {
+  return `Hello, ${name}! Welcome to The Forge Development Cognition System.`;
+}
+
 export function classifyFailure(
   errorMessage: string,
   phase: FailurePhase,
