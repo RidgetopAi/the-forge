@@ -975,8 +975,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[30]: External benchmark (ground truth)
-  const engine = new ForgeEngine('i[30]');
+  // i[31]: External benchmark with git reset (observability + ground truth)
+  const engine = new ForgeEngine('i[31]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

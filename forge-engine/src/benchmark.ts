@@ -249,6 +249,9 @@ class BenchmarkRunner {
       console.log(`TASK ${task.id}: ${task.name}`);
       console.log('─'.repeat(40));
       
+      // i[31]: Reset git state between tasks to prevent accumulation
+      await this.resetGitState(task.targetPath);
+      
       const taskResult = await this.runTask(task);
       result.tasks.push(taskResult);
       
@@ -364,6 +367,21 @@ class BenchmarkRunner {
   }
   
   /**
+   * i[31]: Reset git state to clean slate before each task
+   * This prevents task N's changes from affecting task N+1
+   */
+  private async resetGitState(projectPath: string): Promise<void> {
+    try {
+      console.log('[Benchmark] Resetting git state...');
+      await execAsync('git checkout -- .', { cwd: projectPath });
+      await execAsync('git clean -fd', { cwd: projectPath });
+      console.log('[Benchmark] Git state reset complete');
+    } catch (error) {
+      console.warn('[Benchmark] Warning: Could not reset git state:', error);
+    }
+  }
+  
+  /**
    * Check TypeScript compilation
    */
   private async checkCompilation(projectPath: string): Promise<boolean> {
@@ -450,7 +468,7 @@ async function main() {
     process.exit(1);
   }
   
-  const runner = new BenchmarkRunner('i[30]');
+  const runner = new BenchmarkRunner('i[31]');
   
   if (specificTask !== undefined) {
     const task = BENCHMARK_TASKS.find(t => t.id === specificTask);
