@@ -24,6 +24,9 @@ services:
       # Claude Code auth (persist login between container restarts)
       - ~/.claude:/home/forge/.claude
 
+      # Amp auth (persist login between container restarts)
+      - ~/.amp:/home/forge/.amp
+
       # Docker socket (for Docker-in-Docker capabilities)
       - /var/run/docker.sock:/var/run/docker.sock
 

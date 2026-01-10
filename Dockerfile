@@ -66,6 +66,7 @@ RUN npm install -g \
     typescript \
     tsx \
     @anthropic-ai/claude-code \
+    @sourcegraph/amp \
     nodemon \
     prettier \
     eslint
