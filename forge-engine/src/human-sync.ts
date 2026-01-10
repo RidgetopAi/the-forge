@@ -320,18 +320,32 @@ export const ambiguousTargetTrigger: HumanSyncTrigger = {
 
     // Task mentions specific file/function but not found
     // i[23]: Fixed false positive - exclude common words like "called", "named", etc.
+    // i[34]: Fixed false positive - skip existence check for ADD/CREATE tasks
     const request = ctx.task?.rawRequest ?? '';
+    
+    // i[34]: Detect if this is an ADD task (creating something new)
+    // Pattern: starts with "add" or contains "add a/an/and" before the type mention
+    const isAddTask = /^add\b/i.test(request.trim()) || 
+                      /\badd\s+(a|an|and\s+export)\s+/i.test(request);
+    const isCreateTask = /^create\b/i.test(request.trim()) || 
+                         /\bcreate\s+(a|an)\s+/i.test(request);
+    const isNewThingTask = isAddTask || isCreateTask;
+    
     const mentionsSpecific = /\b(file|function|class|method|component)\s+(\w+)/i.exec(request);
     if (mentionsSpecific) {
       const mentionedName = mentionsSpecific[2].toLowerCase();
       // Skip common verbs/words that aren't actual names
       const commonWords = ['called', 'named', 'defined', 'that', 'which', 'the', 'a', 'an', 'to', 'for', 'with', 'from', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'can', 'could', 'like', 'new', 'add', 'create', 'simple', 'basic', 'helper', 'utility'];
       if (!commonWords.includes(mentionedName)) {
-        const foundInMustRead = pkg.codeContext.mustRead.some(f =>
-          f.path.toLowerCase().includes(mentionedName)
-        );
-        if (!foundInMustRead) {
-          issues.push(`Task mentions "${mentionsSpecific[2]}" but not found in codeContext`);
+        // i[34]: For ADD/CREATE tasks, the target WON'T exist in codeContext - that's expected!
+        // Only fire the "not found" warning for MODIFY/FIX tasks where target should exist
+        if (!isNewThingTask) {
+          const foundInMustRead = pkg.codeContext.mustRead.some(f =>
+            f.path.toLowerCase().includes(mentionedName)
+          );
+          if (!foundInMustRead) {
+            issues.push(`Task mentions "${mentionsSpecific[2]}" but not found in codeContext`);
+          }
         }
       }
     }
