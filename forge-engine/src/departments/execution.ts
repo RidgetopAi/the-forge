@@ -281,25 +281,61 @@ IMPORTANT:
 Generate the code now:`;
   }
 
+  /**
+   * Parse LLM response to extract generated code
+   *
+   * i[19] enhancement: Robust parsing that handles common LLM JSON issues:
+   * - Unescaped newlines in code strings
+   * - Mixed quote styles
+   * - Trailing commas
+   * - Code blocks within JSON content
+   */
   private parseResponse(text: string, projectPath: string): CodeGenerationResult {
     try {
-      // Extract JSON from response
+      // Strategy 1: Extract JSON from markdown code block
       const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-      if (!jsonMatch) {
-        // Try to find raw JSON
-        const rawJsonMatch = text.match(/\{[\s\S]*"files"[\s\S]*\}/);
-        if (!rawJsonMatch) {
-          throw new Error('No JSON found in response');
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[1]);
+          return this.validateAndNormalizeParsed(parsed, projectPath);
+        } catch {
+          // JSON in code block was malformed, try repair
+          const repaired = this.repairJson(jsonMatch[1]);
+          if (repaired) {
+            return this.validateAndNormalizeParsed(repaired, projectPath);
+          }
         }
-        const parsed = JSON.parse(rawJsonMatch[0]);
-        return this.validateAndNormalizeParsed(parsed, projectPath);
       }
 
-      const parsed = JSON.parse(jsonMatch[1]);
-      return this.validateAndNormalizeParsed(parsed, projectPath);
+      // Strategy 2: Try raw JSON extraction
+      const rawJsonMatch = text.match(/\{[\s\S]*"files"[\s\S]*\}/);
+      if (rawJsonMatch) {
+        try {
+          const parsed = JSON.parse(rawJsonMatch[0]);
+          return this.validateAndNormalizeParsed(parsed, projectPath);
+        } catch {
+          const repaired = this.repairJson(rawJsonMatch[0]);
+          if (repaired) {
+            return this.validateAndNormalizeParsed(repaired, projectPath);
+          }
+        }
+      }
+
+      // Strategy 3: Extract files individually using regex
+      // This handles cases where JSON structure is broken but content is there
+      const filesResult = this.extractFilesFromBrokenJson(text, projectPath);
+      if (filesResult.files.length > 0) {
+        console.log(`[Worker:CodeGeneration] Recovered ${filesResult.files.length} file(s) from malformed JSON`);
+        return filesResult;
+      }
+
+      throw new Error('No valid JSON or extractable file content found in response');
 
     } catch (error) {
       console.error('[Worker:CodeGeneration] Failed to parse response:', error);
+      // Log first/last portion of response for debugging
+      console.error('[Worker:CodeGeneration] Response preview (first 500 chars):', text.slice(0, 500));
+      console.error('[Worker:CodeGeneration] Response preview (last 500 chars):', text.slice(-500));
       return {
         success: false,
         files: [],
@@ -307,6 +343,102 @@ Generate the code now:`;
         error: error instanceof Error ? error.message : 'Parse error',
       };
     }
+  }
+
+  /**
+   * Attempt to repair common JSON issues from LLM output
+   *
+   * i[19]: Common issues:
+   * - Literal newlines in string content (should be \n)
+   * - Unescaped quotes and backslashes
+   * - Trailing commas
+   */
+  private repairJson(jsonStr: string): { files?: unknown[]; explanation?: string } | null {
+    try {
+      // First, try as-is (maybe it's already valid)
+      return JSON.parse(jsonStr);
+    } catch {
+      // Continue with repair attempts
+    }
+
+    try {
+      // Try to fix the JSON by finding and escaping content fields
+      // This is a targeted fix for code content with newlines
+      let repaired = jsonStr;
+
+      // Replace literal newlines inside string values with \n
+      // Match "content": "..." patterns and escape newlines within
+      repaired = repaired.replace(
+        /"content"\s*:\s*"([\s\S]*?)"\s*([,}])/g,
+        (match, content, ending) => {
+          // Escape unescaped newlines, tabs, and backslashes
+          const escaped = content
+            .replace(/\\/g, '\\\\')  // Escape backslashes first
+            .replace(/\n/g, '\\n')   // Then newlines
+            .replace(/\r/g, '\\r')   // Carriage returns
+            .replace(/\t/g, '\\t')   // Tabs
+            .replace(/"/g, '\\"');   // Quotes (careful: may double-escape)
+          return `"content": "${escaped}"${ending}`;
+        }
+      );
+
+      // Remove trailing commas before } or ]
+      repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+
+      return JSON.parse(repaired);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Last-resort extraction: Find file paths and content blocks
+   * even if JSON structure is completely broken
+   *
+   * i[19]: Looks for patterns like:
+   * - "path": "/some/path.ts"
+   * - ```typescript ... ``` blocks
+   */
+  private extractFilesFromBrokenJson(
+    text: string,
+    projectPath: string
+  ): CodeGenerationResult {
+    const files: Array<{ path: string; content: string; action: 'create' | 'modify' }> = [];
+
+    // Find all path declarations
+    const pathMatches = [...text.matchAll(/"path"\s*:\s*"([^"]+)"/g)];
+
+    // Find corresponding code blocks (look for typescript/ts blocks or content fields)
+    for (const pathMatch of pathMatches) {
+      const filePath = this.normalizePath(pathMatch[1], projectPath);
+
+      // Look for content after this path declaration
+      const afterPath = text.slice(pathMatch.index! + pathMatch[0].length);
+
+      // Try to find a code block
+      const codeBlockMatch = afterPath.match(/```(?:typescript|ts|javascript|js)?\s*([\s\S]*?)```/);
+
+      if (codeBlockMatch) {
+        files.push({
+          path: filePath,
+          content: codeBlockMatch[1].trim(),
+          action: 'create', // Assume create when we can't determine
+        });
+      }
+    }
+
+    // Try to extract explanation
+    const explanationMatch = text.match(/"explanation"\s*:\s*"([^"]+)"/);
+    const explanation = explanationMatch
+      ? explanationMatch[1]
+      : 'Extracted from partially parsed response';
+
+    return {
+      success: files.length > 0,
+      files,
+      explanation,
+      error: files.length === 0 ? 'Could not extract files from response' : undefined,
+    };
   }
 
   private validateAndNormalizeParsed(

@@ -509,8 +509,104 @@ async function handleRespond(args: string[]): Promise<void> {
   console.log('═'.repeat(60));
 }
 
+/**
+ * Handle --status command to show pending Human Sync requests
+ *
+ * i[19]: This completes the Human Sync workflow by letting users
+ * see all pending requests at a glance before deciding how to respond.
+ */
+async function handleStatus(): Promise<void> {
+  console.log('═'.repeat(60));
+  console.log('THE FORGE - Human Sync Status (i[19])');
+  console.log('═'.repeat(60));
+
+  // Connect to Mandrel
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.error('[Status] Could not connect to Mandrel.');
+    process.exit(1);
+  }
+
+  // Search for pending Human Sync requests
+  console.log('\n[Status] Searching for pending Human Sync requests...\n');
+  const searchResults = await mandrel.searchContext('human-sync-request pending', 20);
+
+  if (!searchResults) {
+    console.log('No pending Human Sync requests found.\n');
+    return;
+  }
+
+  // Extract IDs and fetch each request
+  const ids = mandrel.extractIdsFromSearchResults(searchResults);
+
+  if (ids.length === 0) {
+    console.log('No pending Human Sync requests found.\n');
+    return;
+  }
+
+  console.log('─'.repeat(60));
+  console.log('PENDING HUMAN SYNC REQUESTS');
+  console.log('─'.repeat(60));
+
+  let pendingCount = 0;
+
+  for (const id of ids) {
+    const context = await mandrel.getContextById(id);
+
+    if (context.success && context.content) {
+      // Parse JSON-formatted requests
+      const jsonMatch = context.content.match(/HUMAN_SYNC_REQUEST_JSON:([\s\S]+)/);
+
+      if (jsonMatch) {
+        try {
+          const payload = JSON.parse(jsonMatch[1]);
+
+          // Skip if already responded
+          if (payload.status !== 'pending') continue;
+
+          pendingCount++;
+          const created = new Date(payload.request.created);
+          const ageMs = Date.now() - created.getTime();
+          const ageMinutes = Math.floor(ageMs / 60000);
+          const ageStr = ageMinutes < 60
+            ? `${ageMinutes}m ago`
+            : `${Math.floor(ageMinutes / 60)}h ${ageMinutes % 60}m ago`;
+
+          console.log(`\n${pendingCount}. Request: ${payload.request.id.slice(0, 8)}...`);
+          console.log(`   Task:     ${payload.request.taskId.slice(0, 8)}...`);
+          console.log(`   Trigger:  ${payload.request.trigger}`);
+          console.log(`   Urgency:  ${payload.question.urgency.toUpperCase()}`);
+          console.log(`   Created:  ${ageStr}`);
+          console.log(`   Question: ${payload.question.question}`);
+          console.log('   Options:');
+          for (const opt of payload.question.options) {
+            console.log(`     [${opt.id}] ${opt.label}`);
+          }
+          console.log(`\n   To respond: npx tsx src/index.ts --respond ${payload.request.id} <option-id>`);
+        } catch {
+          // Skip malformed entries
+        }
+      }
+    }
+  }
+
+  console.log('\n' + '─'.repeat(60));
+  if (pendingCount === 0) {
+    console.log('No pending requests found. All Human Sync requests have been resolved.');
+  } else {
+    console.log(`Total: ${pendingCount} pending request(s)`);
+  }
+  console.log('─'.repeat(60));
+}
+
 async function main() {
   const args = process.argv.slice(2);
+
+  // i[19]: Handle --status command to show pending requests
+  if (args.includes('--status')) {
+    await handleStatus();
+    return;
+  }
 
   // i[17]: Handle --respond command for Human Sync responses
   const respondIndex = args.indexOf('--respond');
@@ -529,10 +625,12 @@ async function main() {
 
   if (args.length < 2) {
     console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
+    console.log('       npx tsx src/index.ts --status');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
+    console.log('  --status                     Show pending Human Sync requests');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('');
     console.log('Options:');
@@ -542,6 +640,7 @@ async function main() {
     console.log('Examples:');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README" --execute');
+    console.log('  npx tsx src/index.ts --status');
     console.log('  npx tsx src/index.ts --respond abc-123 proceed_careful --notes "I reviewed the risks"');
     process.exit(1);
   }
@@ -549,8 +648,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[18]: Updated instance ID - implements Tool Building (Hard Problem #5)
-  const engine = new ForgeEngine('i[18]');
+  // i[19]: Updated instance ID - adds --status command and robust JSON parsing
+  const engine = new ForgeEngine('i[19]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
