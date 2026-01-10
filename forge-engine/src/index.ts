@@ -297,8 +297,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[13]: Added Execution Department - the system can now DO things, not just plan!
-  const engine = new ForgeEngine('i[13]');
+  // i[14]: Fixed Learning System - two-phase retrieval now returns actual results!
+  const engine = new ForgeEngine('i[14]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

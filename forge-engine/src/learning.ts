@@ -139,23 +139,49 @@ export class LearningRetriever {
   /**
    * Find previous attempts at similar tasks.
    *
-   * Uses Mandrel's smart_search to find semantically similar tasks.
-   * Parses the response to extract structured information.
+   * i[14] rewrite: Uses two-phase retrieval pattern.
+   *
+   * Previous implementation (i[4]):
+   * - Called smart_search, got truncated display text
+   * - Tried to parse line-by-line looking for "Task:" and "lesson:"
+   * - Returned 0 results because actual data is JSON embedded in content
+   *
+   * New implementation:
+   * 1. smart_search to discover relevant context IDs
+   * 2. Fetch full context for each ID
+   * 3. Parse JSON structures from full content
    */
   private async findPreviousAttempts(
     taskDescription: string
   ): Promise<HistoricalContext['previousAttempts']> {
     try {
-      // Extract key terms for search
+      // Phase 1: Discover relevant contexts
       const keywords = this.extractKeyTerms(taskDescription);
-      const searchQuery = `task ${keywords.join(' ')}`;
+      const searchQuery = `execution-feedback ${keywords.slice(0, 3).join(' ')}`;
 
-      const response = await mandrel.smartSearch(searchQuery);
-      if (!response) return [];
+      console.log(`[LearningRetriever] Searching for: "${searchQuery}"`);
+      const searchResults = await mandrel.smartSearch(searchQuery);
+      if (!searchResults) return [];
 
-      // Parse response to extract previous attempts
-      const attempts = this.parsePreviousAttempts(response, taskDescription);
-      console.log(`[LearningRetriever] Found ${attempts.length} previous attempts`);
+      // Phase 2: Extract IDs and fetch full content
+      const contextIds = mandrel.extractIdsFromSearchResults(searchResults);
+      console.log(`[LearningRetriever] Found ${contextIds.length} context IDs to fetch`);
+
+      const attempts: HistoricalContext['previousAttempts'] = [];
+
+      // Fetch full content for top 5 most relevant
+      for (const id of contextIds.slice(0, 5)) {
+        const fullContext = await mandrel.getContextById(id);
+        if (!fullContext.success || !fullContext.content) continue;
+
+        // Phase 3: Parse JSON from full content
+        const parsed = this.parseExecutionFeedback(fullContext.content, taskDescription);
+        if (parsed) {
+          attempts.push(parsed);
+        }
+      }
+
+      console.log(`[LearningRetriever] Found ${attempts.length} previous attempts (via two-phase retrieval)`);
       return attempts;
     } catch (error) {
       console.warn('[LearningRetriever] Error finding previous attempts:', error);
@@ -164,12 +190,72 @@ export class LearningRetriever {
   }
 
   /**
+   * Parse execution feedback JSON from full context content (i[14] addition)
+   *
+   * Full content format:
+   * "Execution feedback for taskId:\n{JSON object with outcome, learnings, etc.}"
+   */
+  private parseExecutionFeedback(
+    content: string,
+    currentTask: string
+  ): HistoricalContext['previousAttempts'][0] | null {
+    try {
+      // Find JSON object in content (it starts with "{" and includes outcome/learnings)
+      const jsonMatch = content.match(/\{[\s\S]*"outcome"[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      const feedback = JSON.parse(jsonMatch[0]);
+
+      // Extract task description - look in content or use taskId
+      let taskDescription = 'Previous task';
+      if (content.includes('add ') || content.includes('create ') || content.includes('implement ')) {
+        // Try to extract from content
+        const descMatch = content.match(/(?:add|create|implement|fix)\s+[^\n{]+/i);
+        if (descMatch) taskDescription = descMatch[0].trim();
+      }
+
+      // Extract keyFiles from filesActuallyModified or filesActuallyRead
+      const keyFiles: string[] = [
+        ...(feedback.outcome?.filesActuallyModified || []),
+        ...(feedback.outcome?.filesActuallyRead || []),
+      ];
+
+      // Extract lesson from learnings array
+      let lesson = 'No specific lesson captured';
+      if (feedback.learnings && feedback.learnings.length > 0) {
+        lesson = feedback.learnings.map((l: { content: string }) => l.content).join('; ');
+      }
+
+      // Determine outcome
+      const outcome: 'success' | 'partial' | 'failed' =
+        feedback.outcome?.success ? 'success' :
+        feedback.outcome?.compilationPassed ? 'partial' : 'failed';
+
+      return {
+        taskDescription,
+        outcome,
+        keyFiles,
+        lesson,
+        relevanceScore: this.calculateRelevance(taskDescription, currentTask),
+      };
+    } catch (error) {
+      console.warn('[LearningRetriever] Failed to parse execution feedback:', error);
+      return null;
+    }
+  }
+
+  /**
    * Find related technical decisions.
    *
-   * Searches Mandrel for decisions that might be relevant to this task.
+   * i[14] rewrite: Uses two-phase retrieval pattern.
    *
-   * Updated by i[5]: Now uses smartSearch (project-scoped) instead of
-   * searchContext (global) to prevent cross-project contamination.
+   * Previous implementation returned 0 results because it tried to parse
+   * truncated display text for "decision" blocks.
+   *
+   * New implementation:
+   * 1. Search for contexts with type "decision"
+   * 2. Fetch full content for each
+   * 3. Parse the decision structure
    */
   private async findRelatedDecisions(
     taskDescription: string
@@ -178,18 +264,83 @@ export class LearningRetriever {
       const keywords = this.extractKeyTerms(taskDescription);
       const searchQuery = `decision ${keywords.slice(0, 3).join(' ')}`;
 
-      // i[5]: Use smartSearch instead of searchContext
-      // smartSearch is project-scoped, searchContext is global
-      const response = await mandrel.smartSearch(searchQuery);
-      if (!response) return [];
+      console.log(`[LearningRetriever] Searching decisions for: "${searchQuery}"`);
+      const searchResults = await mandrel.smartSearch(searchQuery);
+      if (!searchResults) return [];
 
-      // Parse response to extract decisions
-      const decisions = this.parseDecisions(response);
-      console.log(`[LearningRetriever] Found ${decisions.length} related decisions (via smart_search)`);
+      // Phase 2: Extract IDs and fetch full content
+      const contextIds = mandrel.extractIdsFromSearchResults(searchResults);
+      console.log(`[LearningRetriever] Found ${contextIds.length} decision context IDs`);
+
+      const decisions: HistoricalContext['relatedDecisions'] = [];
+
+      // Fetch full content for top 5 most relevant
+      for (const id of contextIds.slice(0, 5)) {
+        const fullContext = await mandrel.getContextById(id);
+        if (!fullContext.success || !fullContext.content) continue;
+
+        // Only process if it's actually a decision type
+        if (fullContext.type === 'decision') {
+          const parsed = this.parseDecisionContent(fullContext.content);
+          if (parsed) {
+            decisions.push(parsed);
+          }
+        }
+      }
+
+      console.log(`[LearningRetriever] Found ${decisions.length} related decisions (via two-phase retrieval)`);
       return decisions;
     } catch (error) {
       console.warn('[LearningRetriever] Error finding decisions:', error);
       return [];
+    }
+  }
+
+  /**
+   * Parse decision content from full context (i[14] addition)
+   *
+   * Decision contexts may be:
+   * - Markdown format with ## headers
+   * - Plain text with "Decision:" labels
+   * - JSON structure
+   */
+  private parseDecisionContent(
+    content: string
+  ): HistoricalContext['relatedDecisions'][0] | null {
+    try {
+      // Try to extract title (# header or "Decision:" line or first line)
+      let title = 'Untitled Decision';
+      const headerMatch = content.match(/^#\s+(.+)$/m);
+      const decisionLineMatch = content.match(/Decision:\s*(.+)$/m);
+
+      if (headerMatch) {
+        title = headerMatch[1].trim();
+      } else if (decisionLineMatch) {
+        title = decisionLineMatch[1].trim();
+      } else {
+        // Use first non-empty line
+        const firstLine = content.split('\n').find(l => l.trim().length > 0);
+        if (firstLine) title = firstLine.trim().substring(0, 100);
+      }
+
+      // Try to extract rationale
+      let rationale = 'No rationale captured';
+      const rationaleMatch = content.match(/(?:rationale|reason|because|why)[:\s]+([^\n]+)/i);
+      if (rationaleMatch) {
+        rationale = rationaleMatch[1].trim();
+      }
+
+      // Extract tags from content keywords
+      const tags = this.extractKeyTerms(content).slice(0, 3);
+
+      return {
+        title: title.substring(0, 100),
+        decision: content.substring(0, 300),
+        rationale,
+        tags,
+      };
+    } catch {
+      return null;
     }
   }
 

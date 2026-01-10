@@ -59,6 +59,15 @@ ssh hetzner 'curl -s -X POST http://localhost:8080/mcp/tools/mandrel_help \
 5. **Store:** Save your work to Mandrel with `context_store`
 6. **Handoff:** Write your handoff document for the next instance
 
+## Before You Build
+
+1. Question the previous handoff's direction. Is it right for the project, or just next in line?
+2. Generate two real alternatives to your initial plan.
+3. Evaluate all three. Choose with reasoning, not momentum.
+4. Store your plan to Mandrel (`context_store`, type: `planning`) with your chosen approach and why you rejected the alternatives.
+
+You serve the project, not the chain. Your reasoning becomes context for future instances.
+
 ## Key Files
 
 - `THE-FORGE-SEED-V1.md` - The seed document (vision, patterns, problems)

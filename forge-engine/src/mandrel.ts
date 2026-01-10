@@ -390,6 +390,64 @@ export class MandrelClient {
     const response = await this.call('smart_search', { query });
     return response.result?.content[0]?.text ?? '';
   }
+
+  /**
+   * Get context by ID (i[14] addition)
+   *
+   * This is the key to making Learning Retrieval work.
+   * smart_search returns truncated display text with IDs.
+   * This method fetches the FULL context content by ID.
+   *
+   * The two-phase pattern:
+   * 1. smart_search() → discover relevant context IDs
+   * 2. getContextById() → fetch full content for each ID
+   */
+  async getContextById(id: string): Promise<{
+    success: boolean;
+    content?: string;
+    type?: string;
+    tags?: string[];
+  }> {
+    const response = await this.call('context_search', { id });
+    const text = response.result?.content[0]?.text ?? '';
+
+    if (!response.success || !text) {
+      return { success: false };
+    }
+
+    // Parse the display format to extract content
+    // Format: "📄 Context Details\n\n🆔 ID: ...\n📝 Type: ...\n...---\n\n<actual content>"
+    const contentMatch = text.match(/---\n\n([\s\S]*)/);
+    const typeMatch = text.match(/📝 Type: (\w+)/);
+    const tagsMatch = text.match(/🏷️\s+Tags: \[([^\]]*)\]/);
+
+    return {
+      success: true,
+      content: contentMatch?.[1]?.trim() ?? text,
+      type: typeMatch?.[1],
+      tags: tagsMatch?.[1]?.split(',').map(t => t.trim()) ?? [],
+    };
+  }
+
+  /**
+   * Extract context IDs from smart_search results (i[14] addition)
+   *
+   * smart_search returns display text with IDs like:
+   * "🆔 ID: f1a40331-5a09-481a-aa48-a4a32cfb6306"
+   *
+   * This helper extracts all UUIDs from the results.
+   */
+  extractIdsFromSearchResults(searchResults: string): string[] {
+    const uuidPattern = /🆔 ID: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+    const ids: string[] = [];
+    let match;
+
+    while ((match = uuidPattern.exec(searchResults)) !== null) {
+      ids.push(match[1]);
+    }
+
+    return ids;
+  }
 }
 
 // Singleton instance for convenience
