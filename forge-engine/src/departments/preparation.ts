@@ -58,22 +58,48 @@ interface ArchitectureAnalysisResult {
 // Workers (specialized task agents)
 // ============================================================================
 
+/**
+ * i[9] fix: Task-type-aware file discovery
+ *
+ * The original implementation searched file CONTENTS for ALL keywords,
+ * which caused noise: "add a simple README" matched llm.ts because it
+ * contains the word "simple".
+ *
+ * New approach (3 strategies, ordered by priority):
+ * 1. Task-type specific files (README task → .md files, docs/, package.json)
+ * 2. Path-based matching (file NAMES contain keywords)
+ * 3. Content matching with filtered keywords (skip "code noise" words)
+ */
 class FileDiscoveryWorker {
+  // Words that appear commonly in code but aren't meaningful for file discovery
+  // These should NOT be used for content-based file search
+  private static CODE_NOISE_WORDS = new Set([
+    'simple', 'new', 'file', 'data', 'value', 'type', 'name', 'get', 'set',
+    'list', 'item', 'result', 'error', 'message', 'string', 'number', 'boolean',
+    'function', 'method', 'class', 'object', 'array', 'return', 'true', 'false',
+    'null', 'undefined', 'const', 'let', 'var', 'async', 'await', 'export',
+    'import', 'default', 'interface', 'config', 'options', 'params', 'args',
+  ]);
+
   /**
    * Discover relevant files for a task in a codebase
+   *
+   * i[9] refactored: Now uses multi-strategy approach
    */
   async discover(
     projectPath: string,
     keywords: string[],
-    projectType: ProjectType
+    projectType: ProjectType,
+    taskDescription: string = ''  // Added for task-type detection
   ): Promise<FileDiscoveryResult> {
-    console.log(`[Worker:FileDiscovery] Scanning ${projectPath} for: ${keywords.join(', ')}`);
+    console.log(`[Worker:FileDiscovery] Scanning ${projectPath}`);
+    console.log(`[Worker:FileDiscovery] Keywords: ${keywords.join(', ')}`);
 
-    // Get directory structure
+    // Get directory structure (expanded to include more file types)
     let directoryStructure = '';
     try {
       const { stdout } = await execAsync(
-        `find "${projectPath}" -type f -name "*.ts" -o -name "*.js" -o -name "*.tsx" -o -name "*.jsx" | head -50`,
+        `find "${projectPath}" -type f \\( -name "*.ts" -o -name "*.js" -o -name "*.tsx" -o -name "*.jsx" -o -name "*.md" -o -name "*.json" \\) ! -path "*/node_modules/*" | head -50`,
         { timeout: 10000 }
       );
       directoryStructure = stdout;
@@ -81,34 +107,196 @@ class FileDiscoveryWorker {
       directoryStructure = 'Unable to scan directory';
     }
 
-    // Search for keywords using ripgrep
     const relevantFiles: FileDiscoveryResult['relevantFiles'] = [];
+
+    // Strategy 1: Task-type specific files (highest priority)
+    console.log('[Worker:FileDiscovery] Strategy 1: Task-type specific files');
+    const taskTypeFiles = await this.discoverByTaskType(projectPath, taskDescription, keywords);
+    for (const file of taskTypeFiles) {
+      if (!relevantFiles.find(f => f.path === file.path)) {
+        relevantFiles.push({ ...file, priority: 'high' });
+      }
+    }
+
+    // Strategy 2: Path-based matching (file/directory names)
+    console.log('[Worker:FileDiscovery] Strategy 2: Path-based matching');
+    const pathFiles = await this.discoverByPath(projectPath, keywords);
+    for (const file of pathFiles) {
+      const existing = relevantFiles.find(f => f.path === file.path);
+      if (existing) {
+        existing.priority = 'high'; // Multiple strategies matched = high priority
+      } else {
+        relevantFiles.push({ ...file, priority: 'high' });
+      }
+    }
+
+    // Strategy 3: Content matching with filtered keywords (lowest priority)
+    // Only use keywords that aren't "code noise"
+    const meaningfulKeywords = keywords.filter(k => !FileDiscoveryWorker.CODE_NOISE_WORDS.has(k));
+    if (meaningfulKeywords.length > 0) {
+      console.log(`[Worker:FileDiscovery] Strategy 3: Content matching with: ${meaningfulKeywords.join(', ')}`);
+      const contentFiles = await this.discoverByContent(projectPath, meaningfulKeywords);
+      for (const file of contentFiles) {
+        const existing = relevantFiles.find(f => f.path === file.path);
+        if (existing) {
+          existing.priority = 'high';
+        } else {
+          relevantFiles.push({ ...file, priority: 'medium' });
+        }
+      }
+    } else {
+      console.log('[Worker:FileDiscovery] Strategy 3: Skipped (all keywords are code noise)');
+    }
+
+    console.log(`[Worker:FileDiscovery] Found ${relevantFiles.length} relevant files`);
+    return { relevantFiles, directoryStructure };
+  }
+
+  /**
+   * Strategy 1: Discover files based on task type
+   *
+   * For documentation tasks → look for .md files, docs/, package.json
+   * For test tasks → look for test files, __tests__ directories
+   * etc.
+   */
+  private async discoverByTaskType(
+    projectPath: string,
+    taskDescription: string,
+    keywords: string[]
+  ): Promise<Array<{ path: string; reason: string }>> {
+    const lower = (taskDescription || keywords.join(' ')).toLowerCase();
+    const files: Array<{ path: string; reason: string }> = [];
+
+    // Documentation task detection
+    if (lower.includes('readme') || lower.includes('documentation') || lower.includes('docs')) {
+      console.log('[Worker:FileDiscovery] Detected: Documentation task');
+
+      // Find existing README files
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -maxdepth 2 -iname "readme*" -o -iname "*.md" 2>/dev/null | head -5`,
+          { timeout: 5000 }
+        );
+        for (const file of stdout.trim().split('\n').filter(Boolean)) {
+          files.push({ path: file, reason: 'Existing documentation file' });
+        }
+      } catch { /* ignore */ }
+
+      // Find package.json for project metadata
+      try {
+        await fs.access(path.join(projectPath, 'package.json'));
+        files.push({ path: path.join(projectPath, 'package.json'), reason: 'Project metadata' });
+      } catch { /* ignore */ }
+
+      // Find docs directory
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -maxdepth 2 -type d -iname "docs" -o -iname "documentation" 2>/dev/null | head -1`,
+          { timeout: 5000 }
+        );
+        if (stdout.trim()) {
+          files.push({ path: stdout.trim(), reason: 'Documentation directory' });
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Test task detection
+    if (lower.includes('test') || lower.includes('spec')) {
+      console.log('[Worker:FileDiscovery] Detected: Testing task');
+
+      try {
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -type f \\( -name "*.test.ts" -o -name "*.spec.ts" -o -name "*.test.js" \\) ! -path "*/node_modules/*" 2>/dev/null | head -10`,
+          { timeout: 5000 }
+        );
+        for (const file of stdout.trim().split('\n').filter(Boolean)) {
+          files.push({ path: file, reason: 'Test file' });
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Config task detection
+    if (lower.includes('config') || lower.includes('setting') || lower.includes('setup')) {
+      console.log('[Worker:FileDiscovery] Detected: Configuration task');
+
+      const configPatterns = ['tsconfig.json', 'package.json', '.eslintrc*', '.prettierrc*', 'jest.config.*', 'vite.config.*'];
+      for (const pattern of configPatterns) {
+        try {
+          const { stdout } = await execAsync(
+            `find "${projectPath}" -maxdepth 1 -name "${pattern}" 2>/dev/null | head -3`,
+            { timeout: 3000 }
+          );
+          for (const file of stdout.trim().split('\n').filter(Boolean)) {
+            files.push({ path: file, reason: 'Configuration file' });
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    return files;
+  }
+
+  /**
+   * Strategy 2: Discover files by path matching
+   *
+   * Searches for files/directories whose NAMES contain keywords.
+   * This is more reliable than content matching for finding related files.
+   */
+  private async discoverByPath(
+    projectPath: string,
+    keywords: string[]
+  ): Promise<Array<{ path: string; reason: string }>> {
+    const files: Array<{ path: string; reason: string }> = [];
+
+    for (const keyword of keywords) {
+      if (keyword.length < 3) continue; // Skip very short keywords
+
+      try {
+        // Search for files/directories with keyword in name
+        const { stdout } = await execAsync(
+          `find "${projectPath}" -iname "*${keyword}*" ! -path "*/node_modules/*" 2>/dev/null | head -5`,
+          { timeout: 5000 }
+        );
+
+        for (const file of stdout.trim().split('\n').filter(Boolean)) {
+          if (!files.find(f => f.path === file)) {
+            files.push({ path: file, reason: `Name contains "${keyword}"` });
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    return files;
+  }
+
+  /**
+   * Strategy 3: Discover files by content matching
+   *
+   * Searches for keywords inside file contents.
+   * Only used for "meaningful" keywords (not code noise).
+   */
+  private async discoverByContent(
+    projectPath: string,
+    keywords: string[]
+  ): Promise<Array<{ path: string; reason: string }>> {
+    const files: Array<{ path: string; reason: string }> = [];
 
     for (const keyword of keywords) {
       try {
         const { stdout } = await execAsync(
-          `rg -l -i "${keyword}" "${projectPath}" --type ts --type js 2>/dev/null | head -10`,
+          `rg -l -i "${keyword}" "${projectPath}" --type ts --type js --type md 2>/dev/null | grep -v node_modules | head -5`,
           { timeout: 10000 }
         );
 
         for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          const existing = relevantFiles.find(f => f.path === file);
-          if (existing) {
-            existing.priority = 'high'; // Multiple keyword matches = high priority
-          } else {
-            relevantFiles.push({
-              path: file,
-              reason: `Contains "${keyword}"`,
-              priority: 'medium',
-            });
+          if (!files.find(f => f.path === file)) {
+            files.push({ path: file, reason: `Content contains "${keyword}"` });
           }
         }
-      } catch {
-        // No matches for this keyword
-      }
+      } catch { /* ignore */ }
     }
 
-    return { relevantFiles, directoryStructure };
+    return files;
   }
 }
 
@@ -279,11 +467,12 @@ export class PreparationForeman {
       const keywords = this.extractKeywords(task.rawRequest);
       console.log(`[Foreman:Preparation] Keywords: ${keywords.join(', ')}`);
 
-      // Worker: File Discovery
+      // Worker: File Discovery (i[9]: now passes task description for task-type awareness)
       const fileResult = await this.fileWorker.discover(
         projectPath,
         keywords,
-        task.classification.projectType
+        task.classification.projectType,
+        task.rawRequest  // i[9]: Added for task-type-aware file discovery
       );
 
       // Phase 3: Code Context Assembly

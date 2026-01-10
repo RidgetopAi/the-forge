@@ -237,7 +237,7 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[8]'); // Current instance (updated by i[8] - heuristic confidence fix)
+  const engine = new ForgeEngine('i[9]'); // Current instance (updated by i[9] - task-type-aware file discovery)
   const result = await engine.process(request, projectPath);
 
   console.log('\n' + '═'.repeat(60));
