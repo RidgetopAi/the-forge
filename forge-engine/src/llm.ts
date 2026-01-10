@@ -235,8 +235,30 @@ Respond in this exact JSON format:
       }
     }
 
-    // Calculate confidence
-    const confidence = Math.min(0.3 + (bestScore * 0.15), 0.7); // Lower max for heuristics
+    // Calculate confidence based on CLARITY of match (i[8] fix)
+    // Key insight: single unambiguous match is clearer than multiple competing matches
+    let confidence: number;
+
+    // Count how many types got any matches
+    const typesWithMatches = Object.values(typeScores).filter(s => s > 0).length;
+
+    // Find second-best score for margin calculation
+    const sortedScores = Object.values(typeScores).sort((a, b) => b - a);
+    const secondBest = sortedScores[1] || 0;
+
+    if (bestScore === 0) {
+      // No keyword matches at all - low confidence, needs human
+      confidence = 0.25;
+    } else if (typesWithMatches === 1) {
+      // UNAMBIGUOUS: only one type matched - this is actually clear!
+      // "add a README" → only 'feature' matches → confident
+      confidence = Math.min(0.55 + (bestScore * 0.10), 0.75);
+    } else {
+      // AMBIGUOUS: multiple types matched - confidence based on margin
+      // "fix the broken add button" → bugfix: 3, feature: 1 → margin = 2
+      const margin = bestScore - secondBest;
+      confidence = Math.min(0.35 + (margin * 0.15), 0.65);
+    }
 
     // Determine scope
     let scope: 'small' | 'medium' | 'large' = 'medium';
@@ -252,12 +274,19 @@ Respond in this exact JSON format:
 
     const matchedKeywords = TYPE_KEYWORDS[bestType].filter(k => lower.includes(k));
 
+    // Build reasoning with clarity info
+    const clarityNote = typesWithMatches === 1
+      ? 'Unambiguous match (only one type matched).'
+      : typesWithMatches === 0
+        ? 'No keywords matched.'
+        : `Competing matches across ${typesWithMatches} types (margin: ${bestScore - secondBest}).`;
+
     return {
       projectType: bestType as ProjectType,
       scope,
       department,
       confidence,
-      reasoning: `Heuristic classification. Matched keywords: ${matchedKeywords.join(', ') || 'none'}. Consider upgrading to LLM classification for higher accuracy.`,
+      reasoning: `Heuristic classification. Matched: ${matchedKeywords.join(', ') || 'none'}. ${clarityNote}`,
       method: 'heuristic',
     };
   }

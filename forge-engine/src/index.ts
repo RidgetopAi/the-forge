@@ -237,7 +237,7 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  const engine = new ForgeEngine('i[7]'); // Current instance (updated by i[7] - LLM intelligence added)
+  const engine = new ForgeEngine('i[8]'); // Current instance (updated by i[8] - heuristic confidence fix)
   const result = await engine.process(request, projectPath);
 
   console.log('\n' + '═'.repeat(60));
