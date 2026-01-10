@@ -19,6 +19,7 @@ import { mandrel } from './mandrel.js';
 import { llmClient, type QualityEvaluation } from './llm.js';
 import type { HumanSyncRequest } from './types.js';
 import { createInsightGenerator } from './insights.js';
+import { handleSelfImprove, createSelfImprovementDriver, SelfImprovementDriver } from './self-improve.js';
 
 // ============================================================================
 // Forge Engine
@@ -660,6 +661,14 @@ async function main() {
     return;
   }
 
+  // i[28]: Handle --self-improve command for self-improvement loop
+  const selfImproveIndex = args.indexOf('--self-improve');
+  if (selfImproveIndex !== -1) {
+    const selfImproveArgs = args.slice(selfImproveIndex + 1);
+    await handleSelfImprove(selfImproveArgs);
+    return;
+  }
+
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
   const shouldExecute = executeIndex !== -1;
@@ -672,16 +681,20 @@ async function main() {
     console.log('       npx tsx src/index.ts --status');
     console.log('       npx tsx src/index.ts --insights [project-path]');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
+    console.log('       npx tsx src/index.ts --self-improve <project-path> [--dry-run] [--max-tasks N]');
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
     console.log('  --status                     Show pending Human Sync requests');
     console.log('  --insights [path]            Analyze accumulated learning (i[21])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
+    console.log('  --self-improve <path>        Run self-improvement cycle (i[28])');
     console.log('');
     console.log('Options:');
-    console.log('  --execute  Actually execute the task (default: prepare only)');
-    console.log('  --notes    Additional notes for Human Sync response');
+    console.log('  --execute     Actually execute the task (default: prepare only)');
+    console.log('  --notes       Additional notes for Human Sync response');
+    console.log('  --dry-run     Show what self-improve would do without executing');
+    console.log('  --max-tasks   Max tasks for self-improve (default: 1)');
     console.log('');
     console.log('Examples:');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
@@ -690,14 +703,16 @@ async function main() {
     console.log('  npx tsx src/index.ts --insights');
     console.log('  npx tsx src/index.ts --insights /workspace/projects/the-forge');
     console.log('  npx tsx src/index.ts --respond abc-123 proceed_careful --notes "I reviewed the risks"');
+    console.log('  npx tsx src/index.ts --self-improve /workspace/projects/the-forge/forge-engine');
+    console.log('  npx tsx src/index.ts --self-improve /workspace/projects/the-forge/forge-engine --dry-run');
     process.exit(1);
   }
 
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[26]: Root cause analysis enhancement - failure taxonomy
-  const engine = new ForgeEngine('i[27]');
+  // i[28]: Self-improvement driver
+  const engine = new ForgeEngine('i[28]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -753,3 +768,9 @@ export {
   type InsightSummary,
   type ExecutionFeedbackData,
 } from './insights.js';
+// i[28]: Self-Improvement Driver exports (Makes The Forge proactive)
+export {
+  SelfImprovementDriver,
+  createSelfImprovementDriver,
+  handleSelfImprove,
+} from './self-improve.js';

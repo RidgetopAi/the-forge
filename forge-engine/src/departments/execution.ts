@@ -1207,7 +1207,7 @@ export class ExecutionForeman {
       let validation = await this.validationWorker.checkCompilation(projectPath);
 
       // i[27]: Self-heal loop - if compilation fails, try to fix it
-      const MAX_COMPILATION_FIX_ATTEMPTS = 1;
+      const MAX_COMPILATION_FIX_ATTEMPTS = 2;
       let compilationAttempts = 1;
       let compilationSelfHealed = false;
       const allModifiedFiles = [...fileResult.created, ...fileResult.modified, ...fileResult.edited];
