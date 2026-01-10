@@ -149,13 +149,23 @@ export class InsightGenerator {
    * Uses two-phase retrieval:
    * 1. Search for execution-feedback contexts
    * 2. Fetch full content and parse JSON
+   *
+   * i[21] fix: Changed search query from 'execution-feedback' to match actual
+   * JSON content structure. The old query used semantic similarity to "execution-feedback"
+   * but the actual feedback JSON contains "filesActuallyModified", "outcome", etc.
+   * This caused 97% data loss (only 3 of 101 contexts parsed).
    */
   private async collectExecutionFeedback(): Promise<ExecutionFeedbackData[]> {
     const feedbackData: ExecutionFeedbackData[] = [];
 
     try {
-      // Search for all execution feedback
-      const searchResults = await mandrel.searchContext('execution-feedback', 100);
+      // i[21]: Search using actual JSON field names instead of tag name
+      // Old query 'execution-feedback' found 101 results but only 3 parsed
+      // because semantic search matched unrelated content
+      const searchResults = await mandrel.searchContext(
+        'filesActuallyModified filesActuallyRead compilationPassed outcome accuracy mustReadAccuracy',
+        100
+      );
       if (!searchResults) return [];
 
       // Extract context IDs
@@ -291,6 +301,10 @@ export class InsightGenerator {
 
   /**
    * Identify common failure modes from the data.
+   *
+   * i[21] enhancement: Better categorization using structured error messages
+   * from execution.ts. Previously 67% of failures were "unknown_failure"
+   * because error details weren't being captured.
    */
   private identifyFailureModes(data: ExecutionFeedbackData[]): InsightSummary['failureModes'] {
     const failures = data.filter(d => !d.outcome.success);
@@ -307,14 +321,25 @@ export class InsightGenerator {
       } else if (f.outcome.testsRan && !f.outcome.testsPassed) {
         mode = 'test_failure';
       } else {
-        // Check learnings for hints
+        // i[21]: Check learnings for structured error hints
+        // New format: "Task had issues: TypeScript error: TS2345..."
+        // or "Task had issues: Validation failed: tool1, tool2"
         const learningContent = f.learnings.map(l => l.content.toLowerCase()).join(' ');
-        if (learningContent.includes('json') || learningContent.includes('parse')) {
+
+        if (learningContent.includes('typescript error') || learningContent.includes('error ts')) {
+          mode = 'type_error';
+        } else if (learningContent.includes('validation failed')) {
+          mode = 'validation_failure';
+        } else if (learningContent.includes('code generation failed')) {
+          mode = 'code_generation_failure';
+        } else if (learningContent.includes('file operation failed')) {
+          mode = 'file_operation_failure';
+        } else if (learningContent.includes('compilation failed')) {
+          mode = 'compilation_failure';
+        } else if (learningContent.includes('json') || learningContent.includes('parse')) {
           mode = 'json_parsing_error';
         } else if (learningContent.includes('timeout')) {
           mode = 'timeout';
-        } else if (learningContent.includes('type') || learningContent.includes('typescript')) {
-          mode = 'type_error';
         } else {
           mode = 'unknown_failure';
         }

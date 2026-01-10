@@ -603,7 +603,7 @@ async function handleStatus(): Promise<void> {
 /**
  * Handle --insights command to analyze accumulated learning
  *
- * i[20]: This is the key addition that makes learning ACTUALLY compound.
+ * i[21]: This is the key addition that makes learning ACTUALLY compound.
  * Instead of just storing feedback, we analyze it for patterns.
  *
  * Usage: npx tsx src/index.ts --insights [project-path]
@@ -616,7 +616,7 @@ async function handleInsights(projectPath?: string): Promise<void> {
     process.exit(1);
   }
 
-  const generator = createInsightGenerator('i[20]');
+  const generator = createInsightGenerator('i[21]');
   const insights = await generator.generateInsights(projectPath);
   const formatted = generator.formatInsights(insights);
 
@@ -624,14 +624,14 @@ async function handleInsights(projectPath?: string): Promise<void> {
 
   // Store the insight analysis to Mandrel
   await mandrel.storeContext(
-    `Insight Analysis Generated (i[20]):\n` +
+    `Insight Analysis Generated (i[21]):\n` +
     `Total Executions: ${insights.totalExecutions}\n` +
     `Success Rate: ${(insights.successRate * 100).toFixed(1)}%\n` +
     `mustRead Over-Prediction Rate: ${(insights.mustReadAccuracy.overPredictionRate * 100).toFixed(1)}%\n` +
     `Top Recommendation: ${insights.recommendations[0]?.recommendation ?? 'None'}\n` +
     `Failure Modes: ${insights.failureModes.map(m => m.mode).join(', ') || 'None identified'}`,
     'reflections',
-    ['insight-analysis', 'i[20]', 'learning-system']
+    ['insight-analysis', 'i[21]', 'learning-system']
   );
 }
 
@@ -644,7 +644,7 @@ async function main() {
     return;
   }
 
-  // i[20]: Handle --insights command to analyze accumulated learning
+  // i[21]: Handle --insights command to analyze accumulated learning
   const insightsIndex = args.indexOf('--insights');
   if (insightsIndex !== -1) {
     const projectPath = args[insightsIndex + 1]; // Optional project path filter
@@ -676,7 +676,7 @@ async function main() {
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
     console.log('  --status                     Show pending Human Sync requests');
-    console.log('  --insights [path]            Analyze accumulated learning (i[20])');
+    console.log('  --insights [path]            Analyze accumulated learning (i[21])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('');
     console.log('Options:');
@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[20]: Updated instance ID - adds --insights command for pattern analysis
-  const engine = new ForgeEngine('i[20]');
+  // i[21]: Updated instance ID - adds --insights command for pattern analysis
+  const engine = new ForgeEngine('i[21]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));
@@ -746,7 +746,7 @@ export {
   type ValidationResult,
   type ValidationSummary,
 } from './validation-tools.js';
-// i[20]: Insight Generator exports (Hard Problem #3 - Learning System Enhancement)
+// i[21]: Insight Generator exports (Hard Problem #3 - Learning System Enhancement)
 export {
   InsightGenerator,
   createInsightGenerator,

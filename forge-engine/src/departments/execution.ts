@@ -709,6 +709,24 @@ export class ExecutionForeman {
       }
 
       // Build result
+      // i[21]: Determine specific failure reason for learning loop
+      // Previously result.error was only set in catch blocks, causing 67% "unknown_failure"
+      let failureReason: string | undefined;
+      if (!codeResult.success) {
+        failureReason = codeResult.error || 'Code generation failed';
+      } else if (fileResult.errors.length > 0) {
+        failureReason = `File operation failed: ${fileResult.errors.map(e => e.error).join('; ')}`;
+      } else if (!validation.passed) {
+        // Extract first meaningful error from compilation output
+        const compileErrors = validation.output.match(/error TS\d+: [^\n]+/g);
+        failureReason = compileErrors
+          ? `TypeScript error: ${compileErrors[0]}`
+          : `Compilation failed: ${validation.output.substring(0, 150)}`;
+      } else if (!validationPassed && validationSummary) {
+        const failed = validationSummary.results.filter(r => !r.passed);
+        failureReason = `Validation failed: ${failed.map(f => f.toolName).join(', ')}`;
+      }
+
       const result: ExecutionResult = {
         success: codeResult.success && fileResult.errors.length === 0 && validation.passed,
         filesCreated: fileResult.created,
@@ -722,6 +740,7 @@ export class ExecutionForeman {
           validation.passed ? 'TypeScript compilation passed' : `Compilation issues: ${validation.output.substring(0, 200)}`,
           validationSummary ? `Tool validation: ${validationSummary.passed}/${validationSummary.totalTools} passed` : '',
         ].filter(Boolean).join('\n'),
+        error: failureReason, // i[21]: Now captures specific failure reason
       };
 
       // Set execution result on task
