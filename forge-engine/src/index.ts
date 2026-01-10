@@ -696,8 +696,8 @@ async function main() {
   const [projectPath, ...requestParts] = args;
   const request = requestParts.join(' ');
 
-  // i[23]: Fixed Human Sync false positive + external project validation
-  const engine = new ForgeEngine('i[23]');
+  // i[24]: Surgical edit execution - fixes 14.3% success rate root cause
+  const engine = new ForgeEngine('i[24]');
   const result = await engine.process(request, projectPath, { execute: shouldExecute });
 
   console.log('\n' + '═'.repeat(60));

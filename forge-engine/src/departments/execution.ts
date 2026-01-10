@@ -68,12 +68,21 @@ interface ExecutionResult {
   error?: string;
 }
 
+/**
+ * i[24]: Extended to support surgical edits
+ */
+interface FileEdit {
+  search: string;
+  replace: string;
+}
+
 interface CodeGenerationResult {
   success: boolean;
   files: Array<{
     path: string;
-    content: string;
-    action: 'create' | 'modify';
+    action: 'create' | 'modify' | 'edit';
+    content?: string;        // For create/modify
+    edits?: FileEdit[];      // For edit action (i[24])
   }>;
   explanation: string;
   error?: string;
@@ -93,15 +102,27 @@ interface CodeGenerationResult {
  * The LLM is forced to call this tool, and Anthropic's API ensures the
  * arguments conform to the schema.
  */
+/**
+ * i[24]: Redesigned tool schema with surgical edit support.
+ *
+ * Root cause from i[23]: Context budget sends signatures for large files,
+ * but old schema expected full file content. LLM invents content it didn't see,
+ * destroys original file.
+ *
+ * Solution: Add 'edit' action with search/replace pairs for surgical modifications.
+ * - 'create': New file with full content (unchanged)
+ * - 'modify': Replace entire file (use only for small files)
+ * - 'edit': Surgical search/replace edits (use for any existing file)
+ */
 const CODE_GENERATION_TOOL: Anthropic.Tool = {
   name: 'submit_code_changes',
-  description: 'Submit the generated code changes for the task. Call this tool with all files that need to be created or modified.',
+  description: 'Submit the generated code changes for the task. Use "create" for new files, "edit" for surgical changes to existing files (preferred), or "modify" only for complete rewrites of small files.',
   input_schema: {
     type: 'object' as const,
     properties: {
       files: {
         type: 'array',
-        description: 'Array of files to create or modify',
+        description: 'Array of files to create, edit, or modify',
         items: {
           type: 'object',
           properties: {
@@ -111,15 +132,33 @@ const CODE_GENERATION_TOOL: Anthropic.Tool = {
             },
             action: {
               type: 'string',
-              enum: ['create', 'modify'],
-              description: 'Whether to create a new file or modify an existing one',
+              enum: ['create', 'modify', 'edit'],
+              description: 'create = new file, edit = surgical changes (preferred for existing files), modify = full replacement (only for small files)',
             },
             content: {
               type: 'string',
-              description: 'The complete file content',
+              description: 'For create/modify: the complete file content. Not used for edit action.',
+            },
+            edits: {
+              type: 'array',
+              description: 'For edit action: array of search/replace operations to apply in order',
+              items: {
+                type: 'object',
+                properties: {
+                  search: {
+                    type: 'string',
+                    description: 'Exact text to find in the file (must match exactly, including whitespace)',
+                  },
+                  replace: {
+                    type: 'string',
+                    description: 'Text to replace the search string with',
+                  },
+                },
+                required: ['search', 'replace'],
+              },
             },
           },
-          required: ['path', 'action', 'content'],
+          required: ['path', 'action'],
         },
       },
       explanation: {
@@ -363,10 +402,33 @@ ${pkg.constraints.quality.map(c => `- ${c}`).join('\n') || '- None specified'}
 3. Follow existing patterns from the reference files
 4. Use the submit_code_changes tool to provide your code
 
-IMPORTANT:
+## ACTION TYPES (CRITICAL - i[24])
+- **create**: For NEW files only. Provide full content.
+- **edit**: For MODIFYING EXISTING files. Provide search/replace pairs.
+  This is the PREFERRED action for existing files because you may only see
+  signatures or excerpts of large files, not the full content.
+- **modify**: Only use for COMPLETE REWRITES of small files where you've seen
+  the entire file content.
+
+## EDIT FORMAT EXAMPLE
+For the edit action, provide an array of search/replace operations:
+\`\`\`json
+{
+  "path": "/path/to/file.ts",
+  "action": "edit",
+  "edits": [
+    {
+      "search": "res.json({ status: 'ok' })",
+      "replace": "res.json({ status: 'ok', version: VERSION })"
+    }
+  ]
+}
+\`\`\`
+The search string must match EXACTLY what's in the file (including whitespace).
+Each edit is applied in order.
+
+## OTHER REQUIREMENTS
 - Use ABSOLUTE paths based on the project path: ${projectPath}
-- For new files, use "create" action
-- For modifications to existing files, use "modify" action with full file content
 - Follow TypeScript conventions
 - Include necessary imports
 - Generate complete, working code
@@ -615,6 +677,9 @@ Generate the code now:`;
     };
   }
 
+  /**
+   * i[24]: Updated to handle edit action with search/replace pairs
+   */
   private validateAndNormalizeParsed(
     parsed: { files?: unknown[]; explanation?: string },
     projectPath: string
@@ -628,11 +693,28 @@ Generate the code now:`;
       };
     }
 
-    const files = (parsed.files as Array<Record<string, unknown>>).map((f) => ({
-      path: this.normalizePath(String(f.path || ''), projectPath),
-      content: String(f.content || ''),
-      action: (f.action === 'modify' ? 'modify' : 'create') as 'create' | 'modify',
-    }));
+    const files = (parsed.files as Array<Record<string, unknown>>).map((f) => {
+      const action = f.action === 'edit' ? 'edit' : (f.action === 'modify' ? 'modify' : 'create');
+      const path = this.normalizePath(String(f.path || ''), projectPath);
+
+      if (action === 'edit') {
+        // i[24]: Handle edit action with search/replace pairs
+        const edits = Array.isArray(f.edits)
+          ? (f.edits as Array<Record<string, unknown>>).map(e => ({
+              search: String(e.search || ''),
+              replace: String(e.replace || ''),
+            }))
+          : [];
+        return { path, action: action as 'edit', edits };
+      } else {
+        // create or modify - use content
+        return {
+          path,
+          action: action as 'create' | 'modify',
+          content: String(f.content || ''),
+        };
+      }
+    });
 
     return {
       success: true,
@@ -667,49 +749,76 @@ Generate the code now:`;
 /**
  * FileOperationWorker
  *
- * Creates and modifies files safely.
+ * Creates, modifies, and edits files safely.
+ *
+ * i[24]: Added support for surgical edits via search/replace.
+ * This solves the root cause of the 14.3% success rate:
+ * - Context budget sends signatures for large files
+ * - LLM now uses edit action with search/replace instead of full file replacement
+ * - Original file content is preserved, only targeted changes applied
  */
 class FileOperationWorker {
   /**
    * Apply file operations from code generation
+   *
+   * i[24]: Now handles three action types:
+   * - create: New file with full content
+   * - modify: Replace entire file (legacy, use for small files only)
+   * - edit: Surgical search/replace (preferred for existing files)
    */
   async apply(
-    files: Array<{ path: string; content: string; action: 'create' | 'modify' }>
+    files: Array<{
+      path: string;
+      action: 'create' | 'modify' | 'edit';
+      content?: string;
+      edits?: FileEdit[];
+    }>
   ): Promise<{
     created: string[];
     modified: string[];
+    edited: string[];      // i[24]: Track files edited surgically
     errors: Array<{ path: string; error: string }>;
   }> {
     const created: string[] = [];
     const modified: string[] = [];
+    const edited: string[] = [];
     const errors: Array<{ path: string; error: string }> = [];
 
     for (const file of files) {
       try {
-        // Ensure directory exists
-        const dir = path.dirname(file.path);
-        await fs.mkdir(dir, { recursive: true });
-
-        // Check if file exists
-        let exists = false;
-        try {
-          await fs.access(file.path);
-          exists = true;
-        } catch {
-          exists = false;
-        }
-
-        // Write file
-        await fs.writeFile(file.path, file.content, 'utf-8');
-
-        if (exists) {
-          modified.push(file.path);
-          console.log(`[Worker:FileOperation] Modified: ${file.path}`);
+        if (file.action === 'edit') {
+          // i[24]: Surgical edit via search/replace
+          const editResult = await this.applyEdits(file.path, file.edits || []);
+          if (editResult.success) {
+            edited.push(file.path);
+            console.log(`[Worker:FileOperation] Edited: ${file.path} (${editResult.editsApplied} changes)`);
+          } else {
+            errors.push({ path: file.path, error: editResult.error || 'Edit failed' });
+            console.error(`[Worker:FileOperation] Edit failed: ${file.path} - ${editResult.error}`);
+          }
         } else {
-          created.push(file.path);
-          console.log(`[Worker:FileOperation] Created: ${file.path}`);
-        }
+          // create or modify - full file replacement
+          const dir = path.dirname(file.path);
+          await fs.mkdir(dir, { recursive: true });
 
+          let exists = false;
+          try {
+            await fs.access(file.path);
+            exists = true;
+          } catch {
+            exists = false;
+          }
+
+          await fs.writeFile(file.path, file.content || '', 'utf-8');
+
+          if (exists) {
+            modified.push(file.path);
+            console.log(`[Worker:FileOperation] Modified: ${file.path}`);
+          } else {
+            created.push(file.path);
+            console.log(`[Worker:FileOperation] Created: ${file.path}`);
+          }
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         errors.push({ path: file.path, error: message });
@@ -717,7 +826,79 @@ class FileOperationWorker {
       }
     }
 
-    return { created, modified, errors };
+    return { created, modified, edited, errors };
+  }
+
+  /**
+   * i[24]: Apply search/replace edits to a file
+   *
+   * Each edit is applied in order. If any search string is not found,
+   * the operation fails and the file is not modified.
+   */
+  private async applyEdits(
+    filePath: string,
+    edits: FileEdit[]
+  ): Promise<{ success: boolean; editsApplied: number; error?: string }> {
+    if (edits.length === 0) {
+      return { success: false, editsApplied: 0, error: 'No edits provided' };
+    }
+
+    // Read original file
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, 'utf-8');
+    } catch (error) {
+      return {
+        success: false,
+        editsApplied: 0,
+        error: `Cannot read file: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+
+    // Validate all search strings exist before applying any changes
+    for (let i = 0; i < edits.length; i++) {
+      const edit = edits[i];
+      if (!content.includes(edit.search)) {
+        // Provide helpful context for debugging
+        const searchPreview = edit.search.length > 50
+          ? edit.search.substring(0, 50) + '...'
+          : edit.search;
+        return {
+          success: false,
+          editsApplied: 0,
+          error: `Edit ${i + 1}: Search string not found: "${searchPreview}"`,
+        };
+      }
+    }
+
+    // Apply all edits in order
+    let modifiedContent = content;
+    let editsApplied = 0;
+
+    for (const edit of edits) {
+      // Replace first occurrence only (to be precise)
+      const index = modifiedContent.indexOf(edit.search);
+      if (index !== -1) {
+        modifiedContent =
+          modifiedContent.substring(0, index) +
+          edit.replace +
+          modifiedContent.substring(index + edit.search.length);
+        editsApplied++;
+      }
+    }
+
+    // Write the modified content
+    try {
+      await fs.writeFile(filePath, modifiedContent, 'utf-8');
+    } catch (error) {
+      return {
+        success: false,
+        editsApplied: 0,
+        error: `Cannot write file: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+
+    return { success: true, editsApplied };
   }
 }
 
@@ -859,13 +1040,14 @@ export class ExecutionForeman {
       let validationPassed = true;
 
       try {
-        const allFiles = [...fileResult.created, ...fileResult.modified];
+        // i[24]: Include edited files in validation
+        const allFiles = [...fileResult.created, ...fileResult.modified, ...fileResult.edited];
         if (allFiles.length > 0) {
           const tools = await this.toolBuilder.buildTools(
             pkg,
             projectPath,
             fileResult.created,
-            fileResult.modified
+            [...fileResult.modified, ...fileResult.edited]  // i[24]: edited files count as modified
           );
 
           if (tools.length > 0) {
@@ -901,16 +1083,18 @@ export class ExecutionForeman {
         failureReason = `Validation failed: ${failed.map(f => f.toolName).join(', ')}`;
       }
 
+      // i[24]: Include edited files in modified count for result
       const result: ExecutionResult = {
         success: codeResult.success && fileResult.errors.length === 0 && validation.passed,
         filesCreated: fileResult.created,
-        filesModified: fileResult.modified,
+        filesModified: [...fileResult.modified, ...fileResult.edited],  // i[24]: edited files are modified
         filesRead: pkg.codeContext.mustRead.map(f => f.path),
         compilationPassed: validation.passed,
         validationPassed, // i[18]
         validationSummary, // i[18]
         notes: [
           codeResult.explanation,
+          fileResult.edited.length > 0 ? `Surgical edits applied: ${fileResult.edited.length} file(s)` : '',  // i[24]
           validation.passed ? 'TypeScript compilation passed' : `Compilation issues: ${validation.output.substring(0, 200)}`,
           validationSummary ? `Tool validation: ${validationSummary.passed}/${validationSummary.totalTools} passed` : '',
         ].filter(Boolean).join('\n'),
@@ -933,17 +1117,18 @@ export class ExecutionForeman {
         taskManager.transitionState(taskId, 'blocked', this.instanceId, 'Execution had issues');
       }
 
-      // Store to Mandrel (i[18]: now includes validation results)
+      // Store to Mandrel (i[18]: now includes validation results, i[24]: surgical edits)
       await mandrel.storeContext(
         `Execution complete for task ${taskId}:\n` +
         `Success: ${result.success}\n` +
         `Files Created: ${result.filesCreated.join(', ') || 'none'}\n` +
-        `Files Modified: ${result.filesModified.join(', ') || 'none'}\n` +
+        `Files Modified: ${fileResult.modified.join(', ') || 'none'}\n` +
+        `Files Edited (surgical): ${fileResult.edited.join(', ') || 'none'}\n` +  // i[24]
         `Compilation: ${result.compilationPassed ? 'PASSED' : 'FAILED'}\n` +
         `Validation: ${result.validationPassed ? 'PASSED' : 'FAILED'}${validationSummary ? ` (${validationSummary.passed}/${validationSummary.totalTools} tools passed)` : ''}\n` +
         `Notes: ${result.notes}`,
         result.success ? 'completion' : 'error',
-        ['execution', result.success ? 'success' : 'failed', this.instanceId, 'tool-building']
+        ['execution', result.success ? 'success' : 'failed', this.instanceId, fileResult.edited.length > 0 ? 'surgical-edit' : 'tool-building']
       );
 
       console.log(`\n[Foreman:Execution] Complete: ${result.success ? 'SUCCESS' : 'ISSUES FOUND'}`);
