@@ -118,10 +118,16 @@ export const ContextPackage = z.object({
       result: z.string(),
       lesson: z.string(),
     })),
-    relatedDecisions: z.array(z.object({
-      decision: z.string(),
-      rationale: z.string(),
-    })),
+    // HARDENING-8: Accept both object format and string format, normalize to object
+    relatedDecisions: z.array(
+      z.union([
+        z.object({
+          decision: z.string(),
+          rationale: z.string().default('No rationale provided'),
+        }),
+        z.string().transform((s) => ({ decision: s, rationale: 'No rationale provided' })),
+      ])
+    ),
   }),
 
   // Human Sync Points
@@ -339,8 +345,8 @@ export const HistoricalContext = z.object({
   relatedDecisions: z.array(z.object({
     title: z.string(),
     decision: z.string(),
-    rationale: z.string(),
-    tags: z.array(z.string()),
+    rationale: z.string().default('No rationale provided'),  // HARDENING-8
+    tags: z.array(z.string()).default([]),  // HARDENING-8
   })),
 
   // Patterns that worked or failed

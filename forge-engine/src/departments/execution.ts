@@ -43,6 +43,14 @@ import {
   classifyFailure,
   type FailurePhase,
 } from '../types.js';
+import {
+  FeedbackRouter,
+  createFeedbackRouter,
+  ErrorContext,
+  FeedbackAction,
+} from '../feedback-router.js';
+import { TierRouter, calculateCost } from '../tiers.js';
+import { getPatternTracker } from '../pattern-tracker.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
 import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
@@ -76,6 +84,12 @@ interface ExecutionResult {
   notes: string;
   error?: string;
   structuredFailure?: StructuredFailure; // i[26]: Structured failure for analytics
+  // INTEGRATION-4: Cost breakdown by phase
+  costBreakdown?: {
+    codeGeneration: number;
+    selfHeal: number;
+    total: number;
+  };
 }
 
 /**
@@ -96,6 +110,7 @@ interface CodeGenerationResult {
   }>;
   explanation: string;
   error?: string;
+  costUsd?: number; // INTEGRATION-4: Track LLM cost
 }
 
 // ============================================================================
@@ -256,7 +271,8 @@ class CodeGenerationWorker {
       });
     }
 
-    const budgetResult = await processFilesWithBudget(filesToProcess, 40000);
+    // HARDENING-6: Pass projectPath so files are read with absolute paths
+    const budgetResult = await processFilesWithBudget(filesToProcess, 40000, projectPath);
 
     // Report budget usage
     console.log(`[Worker:CodeGeneration] Context Budget Summary:`);
@@ -288,7 +304,9 @@ class CodeGenerationWorker {
 
         if (needsFullContent) {
           try {
-            const fullContent = await fs.readFile(file.path, 'utf-8');
+            // HARDENING-6: Use absolute path for file reading
+            const absolutePath = path.join(projectPath, file.path);
+            const fullContent = await fs.readFile(absolutePath, 'utf-8');
             fileContents.push({
               path: file.path,
               content: fullContent,
@@ -368,13 +386,23 @@ class CodeGenerationWorker {
 
       console.log(`[Worker:CodeGeneration] Tool use received: ${input.files?.length ?? 0} file(s)`);
 
-      return this.validateAndNormalizeParsed(
+      // INTEGRATION-4: Calculate cost from usage
+      const costUsd = calculateCost(
+        'sonnet',
+        response.usage.input_tokens,
+        response.usage.output_tokens
+      );
+      console.log(`[Worker:CodeGeneration] Cost: $${costUsd.toFixed(4)} (${response.usage.input_tokens} in / ${response.usage.output_tokens} out)`);
+
+      const result = this.validateAndNormalizeParsed(
         {
           files: input.files ?? [],
           explanation: input.explanation ?? 'Code generated via tool_use',
         },
         projectPath
       );
+      result.costUsd = costUsd;
+      return result;
 
     } catch (error) {
       console.error('[Worker:CodeGeneration] LLM call failed:', error);
@@ -383,6 +411,7 @@ class CodeGenerationWorker {
         files: [],
         explanation: 'LLM call failed',
         error: error instanceof Error ? error.message : 'Unknown error',
+        costUsd: 0,
       };
     }
   }
@@ -502,6 +531,36 @@ Each edit is applied in order.
 - Follow TypeScript conventions
 - Include necessary imports
 - Generate complete, working code
+
+## MODULE INTEGRATION (HARDENING-7)
+When creating NEW modules or files in a new directory, you MUST also update parent module files:
+
+**For Rust projects:**
+- New \`src/my_module/mod.rs\` → Add \`pub mod my_module;\` to \`src/lib.rs\` or \`src/main.rs\`
+- New submodule \`src/parent/child.rs\` → Add \`pub mod child;\` to \`src/parent/mod.rs\`
+
+**For TypeScript/JavaScript projects:**
+- New module → Update relevant index.ts/index.js to re-export if needed
+- New component → Add to barrel exports if the project uses them
+
+Always check for existing module declaration files and add the necessary exports/declarations.
+
+## ESM/NodeNext IMPORT REQUIREMENTS (HARDENING-4)
+If the project uses ESM with NodeNext/Node16 module resolution (check constraints above), you MUST:
+- Use namespace imports for Node.js built-ins: \`import * as fs from 'node:fs'\`
+- NOT default imports: \`import fs from 'fs'\` ❌ (Node.js built-ins have no default export)
+- Use the 'node:' protocol prefix: node:fs, node:path, node:os, node:crypto, node:http, node:util, etc.
+
+**Common built-in modules requiring namespace imports:**
+- \`import * as fs from 'node:fs'\` or \`import * as fs from 'node:fs/promises'\`
+- \`import * as path from 'node:path'\`
+- \`import * as os from 'node:os'\`
+- \`import * as crypto from 'node:crypto'\`
+- \`import * as http from 'node:http'\`
+- \`import * as https from 'node:https'\`
+- \`import * as url from 'node:url'\`
+- \`import * as util from 'node:util'\`
+- \`import * as child_process from 'node:child_process'\`
 
 Generate the code now by calling the submit_code_changes tool:`;
   }
@@ -889,6 +948,14 @@ Generate the code now:`;
 
       console.log(`[Worker:CodeGeneration] Fix generated: ${input.files?.length ?? 0} file(s)`);
 
+      // INTEGRATION-4: Calculate cost from usage
+      const costUsd = calculateCost(
+        'sonnet',
+        response.usage.input_tokens,
+        response.usage.output_tokens
+      );
+      console.log(`[Worker:CodeGeneration] Self-heal cost: $${costUsd.toFixed(4)} (${response.usage.input_tokens} in / ${response.usage.output_tokens} out)`);
+
       // Filter to only allow changes to files that were modified in the first pass
       // This prevents the LLM from making unauthorized changes
       const allowedFiles = new Set(modifiedFiles);
@@ -900,13 +967,15 @@ Generate the code now:`;
         return isAllowed;
       });
 
-      return this.validateAndNormalizeParsed(
+      const result = this.validateAndNormalizeParsed(
         {
           files: filteredFiles,
           explanation: input.explanation ?? 'Compilation fix generated',
         },
         projectPath
       );
+      result.costUsd = costUsd;
+      return result;
 
     } catch (error) {
       console.error('[Worker:CodeGeneration] Compilation fix LLM call failed:', error);
@@ -915,6 +984,7 @@ Generate the code now:`;
         files: [],
         explanation: 'Compilation fix LLM call failed',
         error: error instanceof Error ? error.message : 'Unknown error',
+        costUsd: 0,
       };
     }
   }
@@ -1188,13 +1258,23 @@ export class ExecutionForeman {
   private fileWorker: FileOperationWorker;
   private validationWorker: ValidationWorker;
   private toolBuilder: ValidationToolBuilder; // i[18]: Tool Building
+  private feedbackRouter: FeedbackRouter | null = null; // Phase 6: Intelligent error routing
+  private patternTracker = getPatternTracker(); // INTEGRATION-2: Direct pattern tracking for execution outcomes
 
-  constructor(instanceId: string) {
+  constructor(instanceId: string, tierRouter?: TierRouter) {
     this.instanceId = instanceId;
     this.codeWorker = new CodeGenerationWorker();
     this.fileWorker = new FileOperationWorker();
     this.validationWorker = new ValidationWorker();
     this.toolBuilder = createValidationToolBuilder(instanceId); // i[18]
+
+    // Phase 6: Initialize FeedbackRouter if TierRouter provided
+    if (tierRouter) {
+      this.feedbackRouter = createFeedbackRouter(tierRouter, getPatternTracker());
+      console.log('[Foreman:Execution] FeedbackRouter initialized (Phase 6)');
+    }
+
+    console.log('[Foreman:Execution] PatternTracker initialized (INTEGRATION-2)');
   }
 
   /**
@@ -1253,6 +1333,10 @@ export class ExecutionForeman {
       console.log(`[Foreman:Execution] Generated ${codeResult.files.length} file(s)`);
       console.log(`[Foreman:Execution] Explanation: ${codeResult.explanation}`);
 
+      // INTEGRATION-4: Track costs
+      let codeGenCost = codeResult.costUsd ?? 0;
+      let selfHealCost = 0;
+
       // Phase 2: File Operations
       console.log('\n[Foreman:Execution] Phase 2: File Operations');
       const fileResult = await this.fileWorker.apply(codeResult.files);
@@ -1273,51 +1357,118 @@ export class ExecutionForeman {
       const allModifiedFiles = [...fileResult.created, ...fileResult.modified, ...fileResult.edited];
 
       if (!validation.passed && allModifiedFiles.length > 0) {
-        console.log('\n[Foreman:Execution] Phase 3b: Compilation Self-Heal (i[27])');
+        console.log('\n[Foreman:Execution] Phase 3b: Compilation Self-Heal (i[27] + Phase 6)');
         console.log(`[Foreman:Execution] Attempting to fix ${validation.output.split('error TS').length - 1} compilation error(s)...`);
 
-        for (let attempt = 0; attempt < MAX_COMPILATION_FIX_ATTEMPTS && !validation.passed; attempt++) {
-          compilationAttempts++;
+        // Phase 6: Use FeedbackRouter for intelligent error routing if available
+        let feedbackAction: FeedbackAction | null = null;
+        if (this.feedbackRouter) {
+          const errorCategory = this.feedbackRouter.categorizeError(validation.output);
+          const errorContext: ErrorContext = {
+            category: errorCategory,
+            message: validation.output,
+            previousAttempts: 0,
+          };
+          feedbackAction = await this.feedbackRouter.routeError(errorContext);
+          console.log(`[Foreman:Execution] FeedbackRouter: ${errorCategory} -> ${feedbackAction.action}`);
 
-          // Generate fix for compilation errors
-          const fixResult = await this.codeWorker.generateWithCompilationFeedback(
-            pkg,
-            projectPath,
-            validation.output,
-            allModifiedFiles
-          );
-
-          if (!fixResult.success || fixResult.files.length === 0) {
-            console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1} failed: ${fixResult.error || 'no fixes generated'}`);
-            break;
+          // If FeedbackRouter says escalate or human_sync immediately, skip self-heal
+          if (feedbackAction.action === 'escalate' || feedbackAction.action === 'human_sync') {
+            console.log(`[Foreman:Execution] FeedbackRouter recommends ${feedbackAction.action}: ${feedbackAction.reason}`);
+            // Skip to end of self-heal loop
           }
+        }
 
-          // Apply the fix
-          console.log(`[Foreman:Execution] Applying ${fixResult.files.length} fix(es)...`);
-          const fixFileResult = await this.fileWorker.apply(fixResult.files);
+        // Only attempt self-heal if FeedbackRouter says retry (or not available)
+        const shouldAttemptSelfHeal = !feedbackAction ||
+          feedbackAction.action === 'retry';
 
-          if (fixFileResult.errors.length > 0) {
-            console.log(`[Foreman:Execution] Fix file operation errors: ${fixFileResult.errors.map(e => e.error).join('; ')}`);
-            break;
-          }
+        if (shouldAttemptSelfHeal) {
+          for (let attempt = 0; attempt < MAX_COMPILATION_FIX_ATTEMPTS && !validation.passed; attempt++) {
+            compilationAttempts++;
 
-          // Track additional modifications from self-heal
-          fileResult.modified.push(...fixFileResult.modified);
-          fileResult.edited.push(...fixFileResult.edited);
+            // Phase 6: Update FeedbackRouter with attempt count
+            if (this.feedbackRouter) {
+              const errorCategory = this.feedbackRouter.categorizeError(validation.output);
+              const errorContext: ErrorContext = {
+                category: errorCategory,
+                message: validation.output,
+                previousAttempts: attempt + 1,
+              };
+              feedbackAction = await this.feedbackRouter.routeError(errorContext);
 
-          // Re-check compilation
-          validation = await this.validationWorker.checkCompilation(projectPath);
+              // Check if we should stop retrying
+              if (feedbackAction.action !== 'retry') {
+                console.log(`[Foreman:Execution] FeedbackRouter says ${feedbackAction.action}: ${feedbackAction.reason}`);
+                break;
+              }
 
-          if (validation.passed) {
-            compilationSelfHealed = true;
-            console.log(`[Foreman:Execution] ✓ Self-heal succeeded! Compilation now passes.`);
-          } else {
-            console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1}: compilation still failing`);
+              // Use suggested fix from FeedbackRouter in the prompt
+              if (feedbackAction.suggestedFix) {
+                console.log(`[Foreman:Execution] FeedbackRouter fix hint: ${feedbackAction.suggestedFix}`);
+              }
+            }
+
+            // Generate fix for compilation errors
+            const fixResult = await this.codeWorker.generateWithCompilationFeedback(
+              pkg,
+              projectPath,
+              validation.output,
+              allModifiedFiles
+            );
+
+            // INTEGRATION-4: Accumulate self-heal costs
+            selfHealCost += fixResult.costUsd ?? 0;
+
+            if (!fixResult.success || fixResult.files.length === 0) {
+              console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1} failed: ${fixResult.error || 'no fixes generated'}`);
+              break;
+            }
+
+            // Apply the fix
+            console.log(`[Foreman:Execution] Applying ${fixResult.files.length} fix(es)...`);
+            const fixFileResult = await this.fileWorker.apply(fixResult.files);
+
+            if (fixFileResult.errors.length > 0) {
+              console.log(`[Foreman:Execution] Fix file operation errors: ${fixFileResult.errors.map(e => e.error).join('; ')}`);
+              break;
+            }
+
+            // Track additional modifications from self-heal
+            fileResult.modified.push(...fixFileResult.modified);
+            fileResult.edited.push(...fixFileResult.edited);
+
+            // Re-check compilation
+            validation = await this.validationWorker.checkCompilation(projectPath);
+
+            if (validation.passed) {
+              compilationSelfHealed = true;
+              console.log(`[Foreman:Execution] ✓ Self-heal succeeded! Compilation now passes.`);
+
+              // Phase 6: Record pattern success if FeedbackRouter available
+              if (this.feedbackRouter && feedbackAction?.patternToUpdate) {
+                await this.feedbackRouter.recordPatternSuccess(
+                  feedbackAction.patternToUpdate,
+                  'self-heal-pattern',
+                  pkg.projectType
+                );
+              }
+            } else {
+              console.log(`[Foreman:Execution] Self-heal attempt ${attempt + 1}: compilation still failing`);
+            }
           }
         }
 
         if (!validation.passed) {
           console.log(`[Foreman:Execution] Self-heal exhausted after ${compilationAttempts} attempts`);
+
+          // Phase 6: Record pattern failure if FeedbackRouter available
+          if (this.feedbackRouter && feedbackAction?.patternToUpdate) {
+            await this.feedbackRouter.recordPatternFailure(
+              feedbackAction.patternToUpdate,
+              'self-heal-pattern'
+            );
+          }
         }
       }
 
@@ -1399,6 +1550,8 @@ export class ExecutionForeman {
       // i[24]: Include edited files in modified count for result
       // i[26]: Include structuredFailure for analytics
       // i[27]: Include self-heal tracking
+      // INTEGRATION-4: Include cost breakdown
+      const totalCost = codeGenCost + selfHealCost;
       const result: ExecutionResult = {
         success: codeResult.success && fileResult.errors.length === 0 && validation.passed,
         filesCreated: fileResult.created,
@@ -1418,6 +1571,12 @@ export class ExecutionForeman {
         ].filter(Boolean).join('\n'),
         error: failureReason, // i[21]: Now captures specific failure reason
         structuredFailure, // i[26]: Structured failure for analytics
+        // INTEGRATION-4: Cost breakdown
+        costBreakdown: {
+          codeGeneration: codeGenCost,
+          selfHeal: selfHealCost,
+          total: totalCost,
+        },
       };
 
       // Set execution result on task
@@ -1449,6 +1608,7 @@ export class ExecutionForeman {
         `Files Edited (surgical): ${fileResult.edited.join(', ') || 'none'}\n` +  // i[24]
         `Compilation: ${result.compilationPassed ? 'PASSED' : 'FAILED'}\n` +
         `Validation: ${result.validationPassed ? 'PASSED' : 'FAILED'}${validationSummary ? ` (${validationSummary.passed}/${validationSummary.totalTools} tools passed)` : ''}\n` +
+        `Cost: $${totalCost.toFixed(4)} (code gen: $${codeGenCost.toFixed(4)}, self-heal: $${selfHealCost.toFixed(4)})\n` +  // INTEGRATION-4
         failureInfo +  // i[26]: Structured failure info
         `\nNotes: ${result.notes}`,
         result.success ? 'completion' : 'error',
@@ -1460,6 +1620,31 @@ export class ExecutionForeman {
           ...(structuredFailure ? [`failure-phase-${structuredFailure.phase}`, `failure-code-${structuredFailure.code}`] : [])
         ]
       );
+
+      // INTEGRATION-2: Record pattern success/failure for learning
+      const patternId = `exec-${pkg.projectType}-${pkg.id.slice(0, 8)}`;
+      if (result.success) {
+        await this.patternTracker.recordSuccess(
+          patternId,
+          `${pkg.projectType} execution`,
+          pkg.task.description.slice(0, 50)
+        );
+        console.log(`[Foreman:Execution] PatternTracker: recorded success for ${patternId}`);
+      } else {
+        await this.patternTracker.recordFailure(
+          patternId,
+          `${pkg.projectType} execution`
+        );
+        console.log(`[Foreman:Execution] PatternTracker: recorded failure for ${patternId}`);
+      }
+
+      // INTEGRATION-4: Log cost breakdown
+      console.log(`\n[Foreman:Execution] Cost Breakdown:`);
+      console.log(`  Code Generation: $${codeGenCost.toFixed(4)}`);
+      if (selfHealCost > 0) {
+        console.log(`  Self-Heal: $${selfHealCost.toFixed(4)}`);
+      }
+      console.log(`  Total Execution: $${totalCost.toFixed(4)}`);
 
       console.log(`\n[Foreman:Execution] Complete: ${result.success ? 'SUCCESS' : 'ISSUES FOUND'}`);
       return result;
@@ -1473,6 +1658,14 @@ export class ExecutionForeman {
 
       // i[26]: Classify infrastructure failure
       const infraFailure = classifyFailure(message, 'infrastructure' as FailurePhase, stack);
+
+      // INTEGRATION-2: Record infrastructure failure pattern
+      const patternId = `exec-${pkg.projectType}-${pkg.id.slice(0, 8)}`;
+      await this.patternTracker.recordFailure(
+        patternId,
+        `${pkg.projectType} execution (infrastructure)`
+      );
+      console.log(`[Foreman:Execution] PatternTracker: recorded infrastructure failure for ${patternId}`);
 
       return {
         success: false,
@@ -1589,6 +1782,9 @@ export class ExecutionForeman {
 }
 
 // Factory function
-export function createExecutionForeman(instanceId: string): ExecutionForeman {
-  return new ExecutionForeman(instanceId);
+export function createExecutionForeman(
+  instanceId: string,
+  tierRouter?: TierRouter
+): ExecutionForeman {
+  return new ExecutionForeman(instanceId, tierRouter);
 }

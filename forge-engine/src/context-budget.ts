@@ -643,7 +643,8 @@ Exports: ${exportNames.slice(0, 10).join(', ')}${exportNames.length > 10 ? ` (+$
  */
 export async function processFilesWithBudget(
   files: Array<{ path: string; reason: string; priority: 'high' | 'medium' | 'low' }>,
-  totalBudget: number = 40000
+  totalBudget: number = 40000,
+  projectPath?: string
 ): Promise<{
   files: BudgetedFile[];
   summary: {
@@ -666,7 +667,9 @@ export async function processFilesWithBudget(
   }> = [];
 
   for (const file of files) {
-    const content = await extractor.extract(file.path);
+    // HARDENING-6: Use absolute path when projectPath is provided
+    const absolutePath = projectPath ? path.join(projectPath, file.path) : file.path;
+    const content = await extractor.extract(absolutePath);
     extracted.push({ file, content });
   }
 
