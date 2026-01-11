@@ -1,0 +1,2138 @@
+{
+  "version": "1.0.0",
+  "description": "Phase 0 Haiku Validation Ground Truth - 60 test cases across 6 workers",
+  "created": "2026-01-11",
+  "thresholds": {
+    "parseSuccessRate": 0.90,
+    "accuracyRate": 0.70,
+    "p95LatencyMs": 5000,
+    "minPassingTests": 42
+  },
+  "workers": {
+    "FileDiscoveryWorker": {
+      "operationType": "file_discovery",
+      "testCases": [
+        {
+          "id": "fd_synthetic_1",
+          "name": "Add authentication to Express app",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Add JWT authentication middleware to the Express application",
+            "projectRoot": "test/synthetic/express-basic"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/middleware/auth.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/routes/users.ts",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/models/user.ts",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/index.ts",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": [
+              {
+                "path": "src/config/jwt.ts",
+                "purpose": "JWT configuration and secrets"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "jaccard_similarity",
+            "threshold": 0.7,
+            "fields": [
+              "relevantFiles.path"
+            ]
+          }
+        },
+        {
+          "id": "fd_synthetic_2",
+          "name": "Fix React component re-rendering",
+          "codebase": "synthetic/react-app",
+          "input": {
+            "task": "Fix unnecessary re-renders in the UserList component when adding new users",
+            "projectRoot": "test/synthetic/react-app"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/components/UserList.tsx",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/components/UserCard.tsx",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/hooks/useUsers.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/App.tsx",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/components/UserList.tsx",
+              "src/hooks/useUsers.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_synthetic_3",
+          "name": "Add form validation to React app",
+          "codebase": "synthetic/react-app",
+          "input": {
+            "task": "Add client-side validation to the user creation form with error messages",
+            "projectRoot": "test/synthetic/react-app"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/components/UserList.tsx",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/App.tsx",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": [
+              {
+                "path": "src/utils/validation.ts",
+                "purpose": "Form validation utilities"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/components/UserList.tsx"
+            ]
+          }
+        },
+        {
+          "id": "fd_synthetic_4",
+          "name": "Add API error handling",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Improve error handling in the users route to return proper HTTP status codes and error messages",
+            "projectRoot": "test/synthetic/express-basic"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/routes/users.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/index.ts",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/models/user.ts",
+                "priority": "may_read"
+              }
+            ],
+            "suggestedNewFiles": [
+              {
+                "path": "src/utils/errors.ts",
+                "purpose": "Custom error classes"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "jaccard_similarity",
+            "threshold": 0.7,
+            "fields": [
+              "relevantFiles.path"
+            ]
+          }
+        },
+        {
+          "id": "fd_synthetic_5",
+          "name": "Add TypeScript strict null checks",
+          "codebase": "synthetic/typed-project",
+          "input": {
+            "task": "Enable strictNullChecks and fix any resulting type errors in the codebase",
+            "projectRoot": "test/synthetic/typed-project"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "tsconfig.json",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/index.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/utils/validator.ts",
+                "priority": "must_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "tsconfig.json",
+              "src/utils/validator.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_real_1",
+          "name": "Add cost tracking to LLM calls",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Add detailed cost tracking for each LLM API call including input/output tokens and USD cost",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/llm.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/types.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/tracing.ts",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "jaccard_similarity",
+            "threshold": 0.7,
+            "fields": [
+              "relevantFiles.path"
+            ]
+          }
+        },
+        {
+          "id": "fd_real_2",
+          "name": "Fix Mandrel base64 encoding",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Fix the base64 encoding issue when sending JSON payloads to Mandrel MCP server",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/mandrel.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/types.ts",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/mandrel.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_real_3",
+          "name": "Add new human sync trigger",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Add a new human sync trigger for when the task involves security-sensitive operations like authentication or encryption",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/human-sync.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/types.ts",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/departments/execution.ts",
+                "priority": "should_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/human-sync.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_real_4",
+          "name": "Add benchmark task",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Add a new benchmark task that tests adding a utility function to an existing file",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/benchmark.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/types.ts",
+                "priority": "may_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/benchmark.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_real_5",
+          "name": "Modify preparation department",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Add a new preparation phase that analyzes test files to understand testing patterns",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/departments/preparation.ts",
+                "priority": "must_read"
+              },
+              {
+                "path": "src/types.ts",
+                "priority": "should_read"
+              },
+              {
+                "path": "src/learning.ts",
+                "priority": "may_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredPaths": [
+              "src/departments/preparation.ts"
+            ]
+          }
+        },
+        {
+          "id": "fd_redesign_1",
+          "name": "Find Express route handlers",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Find all TypeScript files that define Express routes. Look for: (1) files that import Router from express, (2) files that define HTTP handlers (get, post, put, delete methods). Return the file paths and what routes they define.",
+            "projectRoot": "test/synthetic/express-basic"
+          },
+          "expectedOutput": {
+            "relevantFiles": [
+              {
+                "path": "src/routes/users.ts",
+                "reason": "Defines user CRUD routes",
+                "priority": "must_read"
+              }
+            ],
+            "suggestedNewFiles": []
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "threshold": 0.7,
+            "requiredPaths": [
+              "routes/users.ts"
+            ]
+          }
+        }
+      ]
+    },
+    "PatternExtractionWorker": {
+      "operationType": "pattern_extraction",
+      "testCases": [
+        {
+          "id": "pe_synthetic_1",
+          "name": "React hooks patterns",
+          "codebase": "synthetic/patterns",
+          "input": {
+            "task": "Extract React hook usage patterns from this codebase",
+            "projectRoot": "test/synthetic/patterns",
+            "codeSamples": "react-hooks.tsx"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "useState for local state"
+              },
+              {
+                "name": "useEffect with dependency array"
+              },
+              {
+                "name": "useCallback for memoized callbacks"
+              },
+              {
+                "name": "useMemo for expensive computations"
+              },
+              {
+                "name": "Custom hook naming: use* prefix"
+              }
+            ],
+            "conventions": {
+              "naming": "camelCase for hooks, use* prefix for custom hooks"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "useState",
+              "useEffect",
+              "custom hook"
+            ]
+          }
+        },
+        {
+          "id": "pe_synthetic_2",
+          "name": "Error handling patterns",
+          "codebase": "synthetic/patterns",
+          "input": {
+            "task": "Extract error handling patterns from this codebase",
+            "projectRoot": "test/synthetic/patterns",
+            "codeSamples": "error-handling.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Custom error classes extending Error"
+              },
+              {
+                "name": "Result type pattern (Ok/Err)"
+              },
+              {
+                "name": "Error aggregation pattern"
+              },
+              {
+                "name": "Retry with exponential backoff"
+              }
+            ],
+            "conventions": {
+              "errorHandling": "Custom error types with codes, Result pattern for operations that can fail"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "custom error",
+              "Result",
+              "retry"
+            ]
+          }
+        },
+        {
+          "id": "pe_synthetic_3",
+          "name": "API patterns",
+          "codebase": "synthetic/patterns",
+          "input": {
+            "task": "Extract API client patterns from this codebase",
+            "projectRoot": "test/synthetic/patterns",
+            "codeSamples": "api-patterns.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Typed API client class"
+              },
+              {
+                "name": "Request queue for rate limiting"
+              },
+              {
+                "name": "Response caching with TTL"
+              },
+              {
+                "name": "Request deduplication"
+              },
+              {
+                "name": "Polling with backoff"
+              }
+            ],
+            "conventions": {
+              "naming": "ApiClient, RequestQueue, ResponseCache class names"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "API client",
+              "caching",
+              "retry"
+            ]
+          }
+        },
+        {
+          "id": "pe_synthetic_4",
+          "name": "Express middleware patterns",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Extract middleware patterns from this Express application",
+            "projectRoot": "test/synthetic/express-basic",
+            "codeSamples": "src/middleware/auth.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Auth middleware with Bearer token"
+              },
+              {
+                "name": "Request type extension for user context"
+              },
+              {
+                "name": "Role-based access control middleware factory"
+              }
+            ],
+            "conventions": {
+              "naming": "xxxMiddleware function naming"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "middleware",
+              "Bearer",
+              "role"
+            ]
+          }
+        },
+        {
+          "id": "pe_synthetic_5",
+          "name": "TypeScript validation patterns",
+          "codebase": "synthetic/typed-project",
+          "input": {
+            "task": "Extract TypeScript validation patterns from this codebase",
+            "projectRoot": "test/synthetic/typed-project",
+            "codeSamples": "src/utils/validator.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Discriminated union for ValidationResult"
+              },
+              {
+                "name": "ValidationError with codes"
+              },
+              {
+                "name": "Pure validation functions returning Result"
+              }
+            ],
+            "conventions": {
+              "naming": "validate* prefix for validation functions"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "ValidationResult",
+              "discriminated union"
+            ]
+          }
+        },
+        {
+          "id": "pe_real_1",
+          "name": "Mandrel client patterns",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract patterns from the Mandrel client implementation",
+            "projectRoot": ".",
+            "codeSamples": "src/mandrel.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "SSH+curl pattern for remote MCP calls"
+              },
+              {
+                "name": "Base64 encoding for JSON payloads"
+              },
+              {
+                "name": "Error handling with try/catch"
+              }
+            ],
+            "conventions": {
+              "naming": "MandrelClient class, async methods"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "SSH",
+              "Base64",
+              "MCP"
+            ]
+          }
+        },
+        {
+          "id": "pe_real_2",
+          "name": "State machine patterns",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract state machine patterns from the state management code",
+            "projectRoot": ".",
+            "codeSamples": "src/state.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Finite state machine with transitions"
+              },
+              {
+                "name": "State validation before transitions"
+              },
+              {
+                "name": "Invalid transition blocking"
+              }
+            ],
+            "conventions": {
+              "naming": "State type union, transition functions"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "state machine",
+              "transition"
+            ]
+          }
+        },
+        {
+          "id": "pe_real_3",
+          "name": "Zod schema patterns",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract Zod schema definition patterns from the types file",
+            "projectRoot": ".",
+            "codeSamples": "src/types.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "z.object for structured types"
+              },
+              {
+                "name": "z.infer for TypeScript type extraction"
+              },
+              {
+                "name": "z.enum for union types"
+              },
+              {
+                "name": "Nested schema composition"
+              }
+            ],
+            "conventions": {
+              "naming": "*Schema suffix for Zod schemas, inferred types without suffix"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "z.object",
+              "z.infer",
+              "schema"
+            ]
+          }
+        },
+        {
+          "id": "pe_real_4",
+          "name": "Department patterns",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract department class patterns from the preparation department",
+            "projectRoot": ".",
+            "codeSamples": "src/departments/preparation.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Phase-based execution"
+              },
+              {
+                "name": "Shell command execution for file analysis"
+              },
+              {
+                "name": "Result aggregation across phases"
+              }
+            ],
+            "conventions": {
+              "naming": "*Department class suffix"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "phase",
+              "department"
+            ]
+          }
+        },
+        {
+          "id": "pe_real_5",
+          "name": "Human sync trigger patterns",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract human sync trigger patterns from the human-sync module",
+            "projectRoot": ".",
+            "codeSamples": "src/human-sync.ts"
+          },
+          "expectedOutput": {
+            "patterns": [
+              {
+                "name": "Trigger interface pattern"
+              },
+              {
+                "name": "Multiple trigger types with different conditions"
+              },
+              {
+                "name": "Trigger evaluation chain"
+              }
+            ],
+            "conventions": {
+              "naming": "*Trigger suffix for trigger classes"
+            }
+          },
+          "accuracyMetric": {
+            "type": "pattern_overlap",
+            "threshold": 0.6,
+            "requiredPatterns": [
+              "trigger",
+              "human sync"
+            ]
+          }
+        }
+      ]
+    },
+    "DependencyMapperWorker": {
+      "operationType": "dependency_mapping",
+      "testCases": [
+        {
+          "id": "dm_synthetic_1",
+          "name": "Simple dependency chain",
+          "codebase": "synthetic/deps",
+          "input": {
+            "task": "Map the dependency graph starting from the entry file",
+            "projectRoot": "test/synthetic/deps",
+            "entryFile": "index.ts"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "index.ts",
+                "targets": [
+                  "utils/helpers.ts",
+                  "utils/http.ts",
+                  "services/api.ts",
+                  "services/auth.ts"
+                ]
+              },
+              {
+                "source": "utils/http.ts",
+                "targets": [
+                  "utils/helpers.ts"
+                ]
+              },
+              {
+                "source": "services/api.ts",
+                "targets": [
+                  "utils/http.ts",
+                  "services/auth.ts"
+                ]
+              },
+              {
+                "source": "services/auth.ts",
+                "targets": [
+                  "utils/helpers.ts"
+                ]
+              }
+            ],
+            "entryPoints": [
+              "index.ts"
+            ],
+            "circularDependencies": []
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "dm_synthetic_2",
+          "name": "React component dependencies",
+          "codebase": "synthetic/react-app",
+          "input": {
+            "task": "Map the component dependency graph",
+            "projectRoot": "test/synthetic/react-app",
+            "entryFile": "src/App.tsx"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "src/App.tsx",
+                "targets": [
+                  "src/components/UserList.tsx",
+                  "src/hooks/useUsers.ts"
+                ]
+              },
+              {
+                "source": "src/components/UserList.tsx",
+                "targets": [
+                  "src/components/UserCard.tsx"
+                ]
+              },
+              {
+                "source": "src/hooks/useUsers.ts",
+                "targets": [
+                  "src/components/UserList.tsx"
+                ]
+              }
+            ],
+            "entryPoints": [
+              "src/App.tsx"
+            ],
+            "circularDependencies": []
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "dm_synthetic_3",
+          "name": "Express route dependencies",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Map dependencies in the Express application",
+            "projectRoot": "test/synthetic/express-basic",
+            "entryFile": "src/index.ts"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "src/index.ts",
+                "targets": [
+                  "src/routes/users.ts",
+                  "src/middleware/auth.ts"
+                ]
+              },
+              {
+                "source": "src/routes/users.ts",
+                "targets": [
+                  "src/models/user.ts"
+                ]
+              },
+              {
+                "source": "src/middleware/auth.ts",
+                "targets": []
+              }
+            ],
+            "entryPoints": [
+              "src/index.ts"
+            ],
+            "circularDependencies": []
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "dm_synthetic_4",
+          "name": "TypeScript project dependencies",
+          "codebase": "synthetic/typed-project",
+          "input": {
+            "task": "Map dependencies in the TypeScript project",
+            "projectRoot": "test/synthetic/typed-project",
+            "entryFile": "src/index.ts"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "src/index.ts",
+                "targets": [
+                  "src/utils/validator.ts"
+                ]
+              }
+            ],
+            "entryPoints": [
+              "src/index.ts"
+            ],
+            "circularDependencies": []
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "dm_synthetic_5",
+          "name": "Identify leaf modules",
+          "codebase": "synthetic/deps",
+          "input": {
+            "task": "Identify files that have no dependencies (leaf modules)",
+            "projectRoot": "test/synthetic/deps"
+          },
+          "expectedOutput": {
+            "dependencies": [],
+            "entryPoints": [
+              "index.ts"
+            ],
+            "leafModules": [
+              "utils/helpers.ts"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredItems": [
+              "utils/helpers.ts"
+            ]
+          }
+        },
+        {
+          "id": "dm_real_1",
+          "name": "Forge engine entry dependencies",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Map dependencies from the main entry point",
+            "projectRoot": ".",
+            "entryFile": "src/index.ts"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "src/index.ts",
+                "targets": [
+                  "src/types.ts",
+                  "src/mandrel.ts",
+                  "src/departments/preparation.ts",
+                  "src/departments/execution.ts"
+                ]
+              }
+            ],
+            "entryPoints": [
+              "src/index.ts"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "dm_real_2",
+          "name": "External dependencies",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify external npm dependencies used in the codebase",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "externalDependencies": [
+              {
+                "name": "@anthropic-ai/sdk",
+                "usedIn": [
+                  "src/llm.ts"
+                ]
+              },
+              {
+                "name": "zod",
+                "usedIn": [
+                  "src/types.ts"
+                ]
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "requiredItems": [
+              "@anthropic-ai/sdk",
+              "zod"
+            ]
+          }
+        },
+        {
+          "id": "dm_real_3",
+          "name": "Types.ts consumers",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Find all files that import from types.ts",
+            "projectRoot": ".",
+            "targetFile": "src/types.ts"
+          },
+          "expectedOutput": {
+            "dependents": [
+              "src/index.ts",
+              "src/mandrel.ts",
+              "src/llm.ts",
+              "src/departments/preparation.ts",
+              "src/departments/execution.ts"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "recall",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "dm_real_4",
+          "name": "Department file relationships",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Map dependencies between department files",
+            "projectRoot": ".",
+            "directory": "src/departments"
+          },
+          "expectedOutput": {
+            "dependencies": [
+              {
+                "source": "src/departments/execution.ts",
+                "targets": [
+                  "src/departments/preparation.ts",
+                  "src/departments/quality-gate.ts"
+                ]
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "edge_precision",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "dm_real_5",
+          "name": "Detect import types",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Distinguish between type imports and value imports in src/llm.ts",
+            "projectRoot": ".",
+            "targetFile": "src/llm.ts"
+          },
+          "expectedOutput": {
+            "typeImports": [
+              "src/types.ts"
+            ],
+            "valueImports": [
+              "@anthropic-ai/sdk"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "accuracy",
+            "threshold": 0.7
+          }
+        }
+      ]
+    },
+    "ConstraintIdentifierWorker": {
+      "operationType": "constraint_identification",
+      "testCases": [
+        {
+          "id": "ci_synthetic_1",
+          "name": "TypeScript strict mode constraints",
+          "codebase": "synthetic/typed-project",
+          "input": {
+            "task": "Identify TypeScript compiler constraints",
+            "projectRoot": "test/synthetic/typed-project",
+            "configFiles": "tsconfig.json"
+          },
+          "expectedOutput": {
+            "typeConstraints": [
+              {
+                "description": "strict mode enabled",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "noImplicitAny enabled",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "strictNullChecks enabled",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "noUnusedLocals enabled",
+                "enforcement": "compile_time"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "strict",
+              "noImplicitAny"
+            ]
+          }
+        },
+        {
+          "id": "ci_synthetic_2",
+          "name": "ESLint rule constraints",
+          "codebase": "synthetic/typed-project",
+          "input": {
+            "task": "Identify ESLint rules and their severity",
+            "projectRoot": "test/synthetic/typed-project",
+            "configFiles": ".eslintrc.js"
+          },
+          "expectedOutput": {
+            "lintConstraints": [
+              {
+                "rule": "@typescript-eslint/explicit-function-return-type",
+                "severity": "error"
+              },
+              {
+                "rule": "@typescript-eslint/no-explicit-any",
+                "severity": "error"
+              },
+              {
+                "rule": "eqeqeq",
+                "severity": "error"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "explicit-function-return-type",
+              "no-explicit-any"
+            ]
+          }
+        },
+        {
+          "id": "ci_synthetic_3",
+          "name": "Express app constraints",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Identify constraints for the Express application",
+            "projectRoot": "test/synthetic/express-basic",
+            "configFiles": "package.json, tsconfig.json"
+          },
+          "expectedOutput": {
+            "buildConstraints": [
+              {
+                "description": "TypeScript compilation required",
+                "source": "tsconfig.json"
+              },
+              {
+                "description": "Target ES2022",
+                "source": "tsconfig.json"
+              }
+            ],
+            "apiConstraints": [
+              {
+                "description": "JSON body parsing middleware required"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "ci_synthetic_4",
+          "name": "React app constraints",
+          "codebase": "synthetic/react-app",
+          "input": {
+            "task": "Identify React application constraints",
+            "projectRoot": "test/synthetic/react-app",
+            "configFiles": "package.json"
+          },
+          "expectedOutput": {
+            "typeConstraints": [
+              {
+                "description": "React 18 with TypeScript",
+                "enforcement": "compile_time"
+              }
+            ],
+            "buildConstraints": [
+              {
+                "description": "Vite build system",
+                "source": "package.json"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "React",
+              "TypeScript"
+            ]
+          }
+        },
+        {
+          "id": "ci_synthetic_5",
+          "name": "Dependency version constraints",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Identify version constraints for dependencies",
+            "projectRoot": "test/synthetic/express-basic",
+            "configFiles": "package.json"
+          },
+          "expectedOutput": {
+            "buildConstraints": [
+              {
+                "description": "Express ^4.18.2",
+                "source": "package.json"
+              },
+              {
+                "description": "TypeScript ^5.3.0",
+                "source": "package.json"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "ci_real_1",
+          "name": "Forge engine type constraints",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify TypeScript constraints for The Forge",
+            "projectRoot": ".",
+            "configFiles": "tsconfig.json"
+          },
+          "expectedOutput": {
+            "typeConstraints": [
+              {
+                "description": "TypeScript with Zod schemas",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "Must compile with tsc",
+                "enforcement": "compile_time"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "TypeScript",
+              "Zod"
+            ]
+          }
+        },
+        {
+          "id": "ci_real_2",
+          "name": "Mandrel integration constraints",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify constraints related to Mandrel integration",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "apiConstraints": [
+              {
+                "description": "Mandrel MCP server required for context storage"
+              },
+              {
+                "description": "SSH access to Hetzner VPS required"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "Mandrel",
+              "MCP"
+            ]
+          }
+        },
+        {
+          "id": "ci_real_3",
+          "name": "Benchmark constraints",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify constraints that benchmark tests must satisfy",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "testConstraints": [
+              {
+                "description": "Benchmark must pass 100%"
+              },
+              {
+                "description": "Compilation must succeed after changes"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "ci_real_4",
+          "name": "API client constraints",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify Anthropic API constraints",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "apiConstraints": [
+              {
+                "description": "ANTHROPIC_API_KEY environment variable required"
+              },
+              {
+                "description": "API rate limits apply"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7,
+            "requiredConstraints": [
+              "ANTHROPIC_API_KEY"
+            ]
+          }
+        },
+        {
+          "id": "ci_real_5",
+          "name": "Human sync constraints",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Identify constraints for human sync triggers",
+            "projectRoot": "."
+          },
+          "expectedOutput": {
+            "lintConstraints": [
+              {
+                "description": "Triggers must extend base trigger interface"
+              }
+            ],
+            "testConstraints": [
+              {
+                "description": "False positive rate must be minimized"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "constraint_recall",
+            "threshold": 0.7
+          }
+        },
+        {
+          "id": "ci_redesign_1",
+          "name": "TypeScript compiler constraints",
+          "codebase": "synthetic/express-basic",
+          "input": {
+            "task": "Analyze tsconfig.json and identify TypeScript compiler constraints. Report: (1) the target ES version, (2) whether strict mode is enabled and what it enforces, (3) the module system, (4) where source files are compiled from/to.",
+            "projectRoot": "test/synthetic/express-basic"
+          },
+          "expectedOutput": {
+            "typeConstraints": [
+              {
+                "description": "Target ES2022",
+                "source": "tsconfig.json",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "strict mode enabled",
+                "source": "tsconfig.json",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "module commonjs",
+                "source": "tsconfig.json",
+                "enforcement": "compile_time"
+              },
+              {
+                "description": "src to dist compilation",
+                "source": "tsconfig.json",
+                "enforcement": "compile_time"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "must_include",
+            "threshold": 0.75,
+            "requiredItems": [
+              "ES2022",
+              "strict",
+              "commonjs",
+              "src",
+              "dist"
+            ]
+          }
+        }
+      ]
+    },
+    "WebResearchWorker": {
+      "operationType": "web_research",
+      "testCases": [
+        {
+          "id": "wr_1",
+          "name": "Anthropic tool_use format",
+          "input": {
+            "task": "Research Anthropic Claude API tool_use format for function calling",
+            "researchQueries": [
+              "Anthropic Claude API tool_use format",
+              "Claude function calling"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "tool_use block structure",
+                "relevance": "high"
+              },
+              {
+                "topic": "input schema requirements",
+                "relevance": "high"
+              },
+              {
+                "topic": "tool_result response format",
+                "relevance": "high"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "tool_use",
+              "schema",
+              "response"
+            ]
+          }
+        },
+        {
+          "id": "wr_2",
+          "name": "Express.js middleware best practices",
+          "input": {
+            "task": "Research Express.js middleware error handling best practices",
+            "researchQueries": [
+              "Express.js middleware error handling",
+              "Express error-first middleware"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "Error-first middleware pattern",
+                "relevance": "high"
+              },
+              {
+                "topic": "next(err) propagation",
+                "relevance": "high"
+              },
+              {
+                "topic": "Async error handling",
+                "relevance": "medium"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "error-first",
+              "next(err)",
+              "async"
+            ]
+          }
+        },
+        {
+          "id": "wr_3",
+          "name": "React useCallback optimization",
+          "input": {
+            "task": "Research React useCallback best practices for preventing re-renders",
+            "researchQueries": [
+              "React useCallback best practices",
+              "React memoization"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "useCallback dependency array",
+                "relevance": "high"
+              },
+              {
+                "topic": "When to use useCallback vs useMemo",
+                "relevance": "high"
+              }
+            ],
+            "recommendations": [
+              {
+                "action": "Use useCallback for event handlers passed to child components"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "useCallback",
+              "dependency",
+              "memoization"
+            ]
+          }
+        },
+        {
+          "id": "wr_4",
+          "name": "Zod schema validation",
+          "input": {
+            "task": "Research Zod schema validation patterns for API responses",
+            "researchQueries": [
+              "Zod schema validation TypeScript",
+              "Zod parse vs safeParse"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "z.parse vs z.safeParse",
+                "relevance": "high"
+              },
+              {
+                "topic": "Custom error messages",
+                "relevance": "medium"
+              },
+              {
+                "topic": "Schema composition with z.object",
+                "relevance": "high"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "parse",
+              "safeParse",
+              "z.object"
+            ]
+          }
+        },
+        {
+          "id": "wr_5",
+          "name": "TypeScript strict mode",
+          "input": {
+            "task": "Research TypeScript strict mode flags and their effects",
+            "researchQueries": [
+              "TypeScript strict mode",
+              "tsconfig strict flags"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "strict flag enables multiple checks",
+                "relevance": "high"
+              },
+              {
+                "topic": "strictNullChecks behavior",
+                "relevance": "high"
+              },
+              {
+                "topic": "noImplicitAny behavior",
+                "relevance": "high"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "strict",
+              "strictNullChecks",
+              "noImplicitAny"
+            ]
+          }
+        },
+        {
+          "id": "wr_6",
+          "name": "JWT authentication best practices",
+          "input": {
+            "task": "Research JWT authentication best practices for Node.js APIs",
+            "researchQueries": [
+              "JWT authentication Node.js",
+              "JWT security best practices"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "Token expiration strategies",
+                "relevance": "high"
+              },
+              {
+                "topic": "Refresh token patterns",
+                "relevance": "high"
+              },
+              {
+                "topic": "Secure token storage",
+                "relevance": "high"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "expiration",
+              "refresh",
+              "security"
+            ]
+          }
+        },
+        {
+          "id": "wr_7",
+          "name": "Exponential backoff retry",
+          "input": {
+            "task": "Research exponential backoff retry patterns for API calls",
+            "researchQueries": [
+              "exponential backoff retry pattern",
+              "jitter in retry logic"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "Base delay multiplied by 2^attempt",
+                "relevance": "high"
+              },
+              {
+                "topic": "Adding jitter to prevent thundering herd",
+                "relevance": "high"
+              },
+              {
+                "topic": "Maximum retry limits",
+                "relevance": "medium"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "exponential",
+              "jitter",
+              "retry"
+            ]
+          }
+        },
+        {
+          "id": "wr_8",
+          "name": "PostgreSQL with pgvector",
+          "input": {
+            "task": "Research PostgreSQL pgvector extension for semantic search",
+            "researchQueries": [
+              "PostgreSQL pgvector semantic search",
+              "vector similarity search"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "pgvector installation and setup",
+                "relevance": "high"
+              },
+              {
+                "topic": "Cosine similarity search",
+                "relevance": "high"
+              },
+              {
+                "topic": "Index types for vector search",
+                "relevance": "medium"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "pgvector",
+              "cosine",
+              "similarity"
+            ]
+          }
+        },
+        {
+          "id": "wr_9",
+          "name": "SSH command execution",
+          "input": {
+            "task": "Research SSH command execution patterns in Node.js",
+            "researchQueries": [
+              "Node.js SSH command execution",
+              "child_process ssh"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "child_process.exec with ssh",
+                "relevance": "high"
+              },
+              {
+                "topic": "Escaping command arguments",
+                "relevance": "high"
+              },
+              {
+                "topic": "Handling stderr and stdout",
+                "relevance": "medium"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "child_process",
+              "ssh",
+              "exec"
+            ]
+          }
+        },
+        {
+          "id": "wr_10",
+          "name": "Model Context Protocol",
+          "input": {
+            "task": "Research Model Context Protocol (MCP) for AI tool integration",
+            "researchQueries": [
+              "Model Context Protocol MCP",
+              "MCP tool specification"
+            ]
+          },
+          "expectedOutput": {
+            "findings": [
+              {
+                "topic": "MCP tool definition format",
+                "relevance": "high"
+              },
+              {
+                "topic": "MCP server implementation",
+                "relevance": "high"
+              },
+              {
+                "topic": "Tool calling protocol",
+                "relevance": "high"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "relevant_info_present",
+            "requiredTopics": [
+              "MCP",
+              "tool",
+              "protocol"
+            ]
+          }
+        }
+      ]
+    },
+    "DocumentationReaderWorker": {
+      "operationType": "documentation_reading",
+      "testCases": [
+        {
+          "id": "dr_synthetic_1",
+          "name": "API endpoint documentation",
+          "codebase": "synthetic/docs",
+          "input": {
+            "task": "Extract information about authentication endpoints from the API documentation",
+            "projectRoot": "test/synthetic/docs",
+            "documentation": "API.md"
+          },
+          "expectedOutput": {
+            "summary": "REST API with Bearer token authentication",
+            "relevantSections": [
+              {
+                "title": "Authentication",
+                "applicability": "All protected endpoints require Bearer token"
+              }
+            ],
+            "apiReferences": [
+              {
+                "name": "GET /users",
+                "description": "List all users"
+              },
+              {
+                "name": "POST /users",
+                "description": "Create new user"
+              },
+              {
+                "name": "PUT /users/:id",
+                "description": "Update user"
+              },
+              {
+                "name": "DELETE /users/:id",
+                "description": "Delete user"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "Bearer",
+              "GET /users",
+              "POST /users"
+            ]
+          }
+        },
+        {
+          "id": "dr_synthetic_2",
+          "name": "Architecture documentation",
+          "codebase": "synthetic/docs",
+          "input": {
+            "task": "Extract system architecture information",
+            "projectRoot": "test/synthetic/docs",
+            "documentation": "ARCHITECTURE.md"
+          },
+          "expectedOutput": {
+            "summary": "Microservices architecture with API Gateway, User Service, Auth Service",
+            "relevantSections": [
+              {
+                "title": "Core Components",
+                "applicability": "Understanding service boundaries"
+              },
+              {
+                "title": "Data Flow",
+                "applicability": "Understanding request flow"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "microservices",
+              "API Gateway",
+              "User Service"
+            ]
+          }
+        },
+        {
+          "id": "dr_synthetic_3",
+          "name": "Error response documentation",
+          "codebase": "synthetic/docs",
+          "input": {
+            "task": "Extract error response format and error codes from API documentation",
+            "projectRoot": "test/synthetic/docs",
+            "documentation": "API.md"
+          },
+          "expectedOutput": {
+            "summary": "Structured error responses with error codes",
+            "apiReferences": [
+              {
+                "name": "VALIDATION_ERROR",
+                "description": "400 - Request validation failed"
+              },
+              {
+                "name": "NOT_FOUND",
+                "description": "404 - Resource not found"
+              },
+              {
+                "name": "INTERNAL_ERROR",
+                "description": "500 - Server error"
+              }
+            ],
+            "examples": [
+              {
+                "description": "Error response format",
+                "code": "JSON with error.code and error.message"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "VALIDATION_ERROR",
+              "NOT_FOUND",
+              "error.code"
+            ]
+          }
+        },
+        {
+          "id": "dr_synthetic_4",
+          "name": "Database schema documentation",
+          "codebase": "synthetic/docs",
+          "input": {
+            "task": "Extract database schema information from architecture documentation",
+            "projectRoot": "test/synthetic/docs",
+            "documentation": "ARCHITECTURE.md"
+          },
+          "expectedOutput": {
+            "summary": "PostgreSQL database with users and user_profiles tables",
+            "relevantSections": [
+              {
+                "title": "Database Schema",
+                "applicability": "Understanding data model"
+              }
+            ],
+            "examples": [
+              {
+                "description": "users table",
+                "code": "CREATE TABLE users (id UUID, email VARCHAR, ...)"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "PostgreSQL",
+              "users",
+              "user_profiles"
+            ]
+          }
+        },
+        {
+          "id": "dr_synthetic_5",
+          "name": "Rate limiting documentation",
+          "codebase": "synthetic/docs",
+          "input": {
+            "task": "Extract rate limiting information from API documentation",
+            "projectRoot": "test/synthetic/docs",
+            "documentation": "API.md"
+          },
+          "expectedOutput": {
+            "summary": "Rate limiting with per-user and per-IP limits",
+            "relevantSections": [
+              {
+                "title": "Rate Limiting",
+                "applicability": "API usage limits"
+              }
+            ],
+            "warnings": [
+              "100 requests per minute per user",
+              "1000 requests per minute per IP"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "rate limit",
+              "100 requests",
+              "X-RateLimit"
+            ]
+          }
+        },
+        {
+          "id": "dr_real_1",
+          "name": "Forge seed tier system",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract tier system requirements from The Forge seed document",
+            "projectRoot": ".",
+            "documentation": "THE-FORGE-SEED-V2.md"
+          },
+          "expectedOutput": {
+            "summary": "Three-tier model with Opus, Sonnet, and Haiku",
+            "relevantSections": [
+              {
+                "title": "Factory Model",
+                "applicability": "Tier assignment and responsibilities"
+              }
+            ],
+            "apiReferences": [
+              {
+                "name": "Opus",
+                "description": "Plant Manager - judgment tier"
+              },
+              {
+                "name": "Sonnet",
+                "description": "Foremen - supervision tier"
+              },
+              {
+                "name": "Haiku",
+                "description": "Workers - labor tier"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "Opus",
+              "Sonnet",
+              "Haiku",
+              "tier"
+            ]
+          }
+        },
+        {
+          "id": "dr_real_2",
+          "name": "Forge implementation phases",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract implementation phases from the executable plan",
+            "projectRoot": ".",
+            "documentation": "SIRK-V2-EXECUTABLE-PLAN.md"
+          },
+          "expectedOutput": {
+            "summary": "6 implementation phases from Haiku validation to FeedbackRouter",
+            "relevantSections": [
+              {
+                "title": "Phase 0",
+                "applicability": "Haiku validation gate"
+              },
+              {
+                "title": "Phase 1",
+                "applicability": "Tier system foundation"
+              },
+              {
+                "title": "Phase 3",
+                "applicability": "Worker implementations"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "Phase 0",
+              "validation",
+              "Phase 1",
+              "tier"
+            ]
+          }
+        },
+        {
+          "id": "dr_real_3",
+          "name": "Worker output schemas",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract worker output schema definitions from the executable plan",
+            "projectRoot": ".",
+            "documentation": "SIRK-V2-EXECUTABLE-PLAN.md"
+          },
+          "expectedOutput": {
+            "summary": "Zod schemas for all 6 worker output types",
+            "apiReferences": [
+              {
+                "name": "FileDiscoveryOutputSchema",
+                "description": "relevantFiles, suggestedNewFiles, confidence"
+              },
+              {
+                "name": "PatternExtractionOutputSchema",
+                "description": "patterns, conventions, antiPatterns"
+              },
+              {
+                "name": "DependencyMapperOutputSchema",
+                "description": "dependencies, externalDependencies, entryPoints"
+              }
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "FileDiscoveryOutputSchema",
+              "PatternExtractionOutputSchema",
+              "Zod"
+            ]
+          }
+        },
+        {
+          "id": "dr_real_4",
+          "name": "Success metrics",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract success metrics from the executable plan",
+            "projectRoot": ".",
+            "documentation": "SIRK-V2-EXECUTABLE-PLAN.md"
+          },
+          "expectedOutput": {
+            "summary": "Validation thresholds and success criteria",
+            "relevantSections": [
+              {
+                "title": "Success Metrics",
+                "applicability": "Measuring implementation success"
+              }
+            ],
+            "warnings": [
+              "Parse success rate >= 90%",
+              "Accuracy >= 70%",
+              "P95 latency <= 5000ms"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "90%",
+              "70%",
+              "5000ms"
+            ]
+          }
+        },
+        {
+          "id": "dr_real_5",
+          "name": "Risk register",
+          "codebase": "forge-engine",
+          "input": {
+            "task": "Extract risk register and mitigations from the executable plan",
+            "projectRoot": ".",
+            "documentation": "SIRK-V2-EXECUTABLE-PLAN.md"
+          },
+          "expectedOutput": {
+            "summary": "Risk register with probability, impact, and mitigations",
+            "relevantSections": [
+              {
+                "title": "Risk Register",
+                "applicability": "Implementation risks and mitigations"
+              }
+            ],
+            "warnings": [
+              "Haiku accuracy too low - fallback to Sonnet",
+              "Mandrel unavailable - graceful degradation",
+              "Integration breaks benchmark - rollback"
+            ]
+          },
+          "accuracyMetric": {
+            "type": "info_extraction",
+            "threshold": 0.7,
+            "requiredInfo": [
+              "Haiku accuracy",
+              "Mandrel",
+              "rollback"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
