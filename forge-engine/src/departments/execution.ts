@@ -345,6 +345,13 @@ class CodeGenerationWorker {
 
     try {
       console.log('[Worker:CodeGeneration] Calling LLM with tool_use (i[22])...');
+      // DEBUG: Log prompt for debugging
+      if (process.env.FORGE_DEBUG_PROMPT) {
+        console.log('[Worker:CodeGeneration] DEBUG - Full prompt:');
+        console.log('='.repeat(80));
+        console.log(prompt);
+        console.log('='.repeat(80));
+      }
 
       // i[22]: Use tool_use with tool_choice: 'any' to force structured output
       const response = await this.client.messages.create({
@@ -385,14 +392,78 @@ class CodeGenerationWorker {
       };
 
       console.log(`[Worker:CodeGeneration] Tool use received: ${input.files?.length ?? 0} file(s)`);
-
       // INTEGRATION-4: Calculate cost from usage
-      const costUsd = calculateCost(
+      let costUsd = calculateCost(
         'sonnet',
         response.usage.input_tokens,
         response.usage.output_tokens
       );
       console.log(`[Worker:CodeGeneration] Cost: $${costUsd.toFixed(4)} (${response.usage.input_tokens} in / ${response.usage.output_tokens} out)`);
+
+      // HARDENING-10: Feedback loop - if no files generated, retry with forceful prompt
+      if (!input.files || input.files.length === 0) {
+        console.log('[Worker:CodeGeneration] WARNING: No files generated. Retrying with explicit instruction...');
+
+        const retryPrompt = `${prompt}
+
+IMPORTANT: Your previous response had an EMPTY files array. This is not acceptable.
+You provided this explanation: "${input.explanation}"
+
+Now you MUST actually generate the code. Create the files described in your explanation.
+The files array CANNOT be empty. Generate at least one file with actual code.
+
+Call submit_code_changes now with the actual file contents:`;
+
+        const retryResponse = await this.client.messages.create({
+          model: this.model,
+          max_tokens: 8000,
+          tools: [CODE_GENERATION_TOOL],
+          tool_choice: { type: 'any' },
+          messages: [{ role: 'user', content: retryPrompt }],
+        });
+
+        const retryToolUse = retryResponse.content.find(
+          (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
+        );
+
+        if (retryToolUse && retryToolUse.name === 'submit_code_changes') {
+          const retryInput = retryToolUse.input as {
+            files?: Array<{ path: string; action: string; content: string }>;
+            explanation?: string;
+          };
+
+          const retryCost = calculateCost(
+            'sonnet',
+            retryResponse.usage.input_tokens,
+            retryResponse.usage.output_tokens
+          );
+          costUsd += retryCost;
+          console.log(`[Worker:CodeGeneration] Retry cost: $${retryCost.toFixed(4)} (${retryResponse.usage.input_tokens} in / ${retryResponse.usage.output_tokens} out)`);
+          console.log(`[Worker:CodeGeneration] Retry produced ${retryInput.files?.length ?? 0} file(s)`);
+
+          if (retryInput.files && retryInput.files.length > 0) {
+            const result = this.validateAndNormalizeParsed(
+              {
+                files: retryInput.files,
+                explanation: retryInput.explanation ?? 'Code generated via tool_use (retry)',
+              },
+              projectPath
+            );
+            result.costUsd = costUsd;
+            return result;
+          }
+        }
+
+        // Still no files after retry - return failure
+        console.log('[Worker:CodeGeneration] ERROR: Still no files after retry. Returning failure.');
+        return {
+          success: false,
+          files: [],
+          explanation: input.explanation ?? 'LLM failed to generate code after retry',
+          error: 'EMPTY_FILES_AFTER_RETRY',
+          costUsd,
+        };
+      }
 
       const result = this.validateAndNormalizeParsed(
         {
@@ -562,7 +633,14 @@ If the project uses ESM with NodeNext/Node16 module resolution (check constraint
 - \`import * as util from 'node:util'\`
 - \`import * as child_process from 'node:child_process'\`
 
-Generate the code now by calling the submit_code_changes tool:`;
+## CRITICAL: YOU MUST GENERATE ACTUAL CODE (HARDENING-10)
+- The \`files\` array in your tool call MUST NOT be empty
+- Do NOT just explain what you would do - actually DO IT
+- Every task requires at least one file to be created or modified
+- If you're unsure, create the new file(s) anyway - we can iterate
+- An empty files array is a FAILURE - you must produce working code
+
+Generate the code now by calling the submit_code_changes tool with actual file changes:`;
   }
 
   private buildPrompt(
@@ -1208,24 +1286,44 @@ class FileOperationWorker {
  */
 class ValidationWorker {
   /**
-   * Run TypeScript compilation check
+   * Run compilation check (TypeScript or Rust)
+   * HARDENING-11: Added Rust support via cargo check
    */
   async checkCompilation(projectPath: string): Promise<{
     passed: boolean;
     output: string;
+    projectType: 'typescript' | 'rust' | 'unknown';
+  }> {
+    // Check for TypeScript project
+    const tsconfigPath = path.join(projectPath, 'tsconfig.json');
+    const hasTypeScript = await fs.access(tsconfigPath).then(() => true).catch(() => false);
+
+    if (hasTypeScript) {
+      return this.checkTypeScriptCompilation(projectPath);
+    }
+
+    // HARDENING-11: Check for Rust project
+    const cargoPath = path.join(projectPath, 'Cargo.toml');
+    const hasRust = await fs.access(cargoPath).then(() => true).catch(() => false);
+
+    if (hasRust) {
+      return this.checkRustCompilation(projectPath);
+    }
+
+    // No recognized project type
+    console.log('[Worker:Validation] No tsconfig.json or Cargo.toml found, skipping compilation check');
+    return { passed: true, output: 'No recognized project type', projectType: 'unknown' };
+  }
+
+  /**
+   * Run TypeScript compilation check
+   */
+  private async checkTypeScriptCompilation(projectPath: string): Promise<{
+    passed: boolean;
+    output: string;
+    projectType: 'typescript' | 'rust' | 'unknown';
   }> {
     try {
-      // Find tsconfig.json
-      const tsconfigPath = path.join(projectPath, 'tsconfig.json');
-      try {
-        await fs.access(tsconfigPath);
-      } catch {
-        // No tsconfig, skip compilation check
-        console.log('[Worker:Validation] No tsconfig.json found, skipping compilation check');
-        return { passed: true, output: 'No tsconfig.json found' };
-      }
-
-      // Run tsc --noEmit
       console.log('[Worker:Validation] Running TypeScript compilation check...');
       const { stdout, stderr } = await execAsync(
         `cd "${projectPath}" && npx tsc --noEmit 2>&1`,
@@ -1235,15 +1333,47 @@ class ValidationWorker {
       const output = stdout + stderr;
       const passed = !output.includes('error TS');
 
-      console.log(`[Worker:Validation] Compilation: ${passed ? 'PASSED' : 'FAILED'}`);
+      console.log(`[Worker:Validation] TypeScript compilation: ${passed ? 'PASSED' : 'FAILED'}`);
 
-      return { passed, output: output.trim() || 'Compilation successful' };
+      return { passed, output: output.trim() || 'Compilation successful', projectType: 'typescript' };
 
     } catch (error) {
       // tsc returns non-zero on errors
       const message = error instanceof Error ? (error as Error & { stdout?: string; stderr?: string }).stdout || (error as Error & { stderr?: string }).stderr || error.message : 'Unknown error';
       const passed = !message.includes('error TS');
-      return { passed, output: message };
+      return { passed, output: message, projectType: 'typescript' };
+    }
+  }
+
+  /**
+   * Run Rust compilation check (HARDENING-11)
+   */
+  private async checkRustCompilation(projectPath: string): Promise<{
+    passed: boolean;
+    output: string;
+    projectType: 'typescript' | 'rust' | 'unknown';
+  }> {
+    try {
+      console.log('[Worker:Validation] Running Rust compilation check (cargo check)...');
+      const { stdout, stderr } = await execAsync(
+        `cd "${projectPath}" && cargo check --lib 2>&1`,
+        { timeout: 120000 } // Rust compilation can be slow
+      );
+
+      const output = stdout + stderr;
+      // Rust errors contain "error[E" pattern
+      const passed = !output.includes('error[E') && !output.includes('error:');
+
+      console.log(`[Worker:Validation] Rust compilation: ${passed ? 'PASSED' : 'FAILED'}`);
+
+      return { passed, output: output.trim() || 'Compilation successful', projectType: 'rust' };
+
+    } catch (error) {
+      // cargo returns non-zero on errors
+      const message = error instanceof Error ? (error as Error & { stdout?: string; stderr?: string }).stdout || (error as Error & { stderr?: string }).stderr || error.message : 'Unknown error';
+      const passed = !message.includes('error[E') && !message.includes('error:');
+      console.log(`[Worker:Validation] Rust compilation: ${passed ? 'PASSED' : 'FAILED'}`);
+      return { passed, output: message, projectType: 'rust' };
     }
   }
 }
@@ -1348,6 +1478,11 @@ export class ExecutionForeman {
 
       // Phase 3: Compilation Validation (with self-heal loop - i[27])
       console.log('\n[Foreman:Execution] Phase 3: Compilation Validation');
+
+      // HARDENING-13: Small delay to ensure files are fully written to disk
+      // This prevents race conditions where tsc runs before file sync completes
+      await new Promise(resolve => setTimeout(resolve, 100));
+
       let validation = await this.validationWorker.checkCompilation(projectPath);
 
       // i[27]: Self-heal loop - if compilation fails, try to fix it
@@ -1469,6 +1604,9 @@ export class ExecutionForeman {
               'self-heal-pattern'
             );
           }
+
+          // HARDENING-12: Store compilation errors as learning for future runs
+          await this.storeCompilationErrorLearning(validation.output, projectPath, allModifiedFiles);
         }
       }
 
@@ -1778,6 +1916,81 @@ export class ExecutionForeman {
     );
 
     return feedback;
+  }
+
+  /**
+   * HARDENING-12: Store compilation errors as learnings for future runs
+   *
+   * Parses common error patterns and stores them to Mandrel so the LLM
+   * can learn from mistakes (e.g., wrong import locations).
+   */
+  private async storeCompilationErrorLearning(
+    compilationOutput: string,
+    projectPath: string,
+    modifiedFiles: string[]
+  ): Promise<void> {
+    try {
+      const learnings: string[] = [];
+      const projectName = projectPath.split('/').pop() || 'unknown';
+
+      // Pattern 1: Module has no exported member (wrong import location)
+      // e.g., "Module '"./types.js"' has no exported member 'ExecutionTrace'"
+      const exportErrorRegex = /Module '"([^"]+)"' has no exported member '([^']+)'/g;
+      let match;
+      while ((match = exportErrorRegex.exec(compilationOutput)) !== null) {
+        const wrongModule = match[1];
+        const missingExport = match[2];
+        learnings.push(`❌ WRONG: import { ${missingExport} } from '${wrongModule}' - this module does NOT export ${missingExport}`);
+      }
+
+      // Pattern 2: Cannot find module (missing dependency or wrong path)
+      // e.g., "Cannot find module 'ws'"
+      const moduleNotFoundRegex = /Cannot find module '([^']+)'/g;
+      while ((match = moduleNotFoundRegex.exec(compilationOutput)) !== null) {
+        const missingModule = match[1];
+        if (!missingModule.startsWith('.') && !missingModule.startsWith('/')) {
+          learnings.push(`📦 MISSING DEPENDENCY: '${missingModule}' - must be installed via npm/yarn before use`);
+        } else {
+          learnings.push(`📁 WRONG PATH: '${missingModule}' - file does not exist at this path`);
+        }
+      }
+
+      // Pattern 3: Property does not exist on type
+      const propErrorRegex = /Property '([^']+)' does not exist on type '([^']+)'/g;
+      while ((match = propErrorRegex.exec(compilationOutput)) !== null) {
+        const prop = match[1];
+        const typeName = match[2];
+        learnings.push(`🔧 TYPE ERROR: '${prop}' is not a property of '${typeName}'`);
+      }
+
+      if (learnings.length === 0) {
+        return; // No patterns matched, don't store
+      }
+
+      const content = `## Compilation Error Learning - ${projectName}
+
+### Files That Caused Errors
+${modifiedFiles.map(f => `- ${f}`).join('\n')}
+
+### Learnings (DO NOT REPEAT THESE MISTAKES)
+${learnings.map((l, i) => `${i + 1}. ${l}`).join('\n')}
+
+### Raw Error Output (first 500 chars)
+\`\`\`
+${compilationOutput.substring(0, 500)}
+\`\`\`
+`;
+
+      await mandrel.storeContext(
+        content,
+        'error',
+        ['compilation-error', 'learning', projectName, this.instanceId]
+      );
+
+      console.log(`[Foreman:Execution] Stored ${learnings.length} compilation error learning(s) to Mandrel`);
+    } catch (error) {
+      console.warn('[Foreman:Execution] Failed to store compilation error learning:', error);
+    }
   }
 }
 

@@ -129,7 +129,12 @@ export class ValidationToolBuilder {
         break;
     }
 
-    // Strategy 3: LLM-generated custom validations (for complex cases)
+    // Strategy 3: CLI runtime validation (HARDENING-5)
+    // If this looks like a CLI task, add runtime execution validation
+    const cliValidations = await this.buildCliValidations(pkg, allFiles, projectPath);
+    tools.push(...cliValidations);
+
+    // Strategy 4: LLM-generated custom validations (for complex cases)
     if (this.client && allFiles.length <= 5) {
       const customTools = await this.buildCustomValidations(pkg, allFiles, projectPath);
       tools.push(...customTools);
@@ -480,6 +485,156 @@ export class ValidationToolBuilder {
     });
 
     return tools;
+  }
+
+  // ============================================================================
+  // CLI Runtime Validation (HARDENING-5)
+  // ============================================================================
+
+  /**
+   * Detect if this looks like a CLI task and add runtime execution validation.
+   *
+   * HARDENING-5: Addresses the gap where code passes compilation but crashes at runtime.
+   * Example: RangeError: Invalid count value: -6 at String.repeat()
+   *
+   * This catches runtime errors that static analysis misses.
+   */
+  private async buildCliValidations(
+    pkg: ContextPackage,
+    files: string[],
+    projectPath: string
+  ): Promise<ValidationTool[]> {
+    const tools: ValidationTool[] = [];
+
+    // Detect CLI entry points
+    const cliEntryPoint = await this.detectCliEntryPoint(files, projectPath);
+    if (!cliEntryPoint) {
+      return tools;
+    }
+
+    console.log(`[ValidationToolBuilder] CLI entry point detected: ${cliEntryPoint.file}`);
+
+    // Add runtime execution validation
+    tools.push({
+      id: 'cli-runtime-execution',
+      name: 'CLI runtime execution',
+      type: 'script',
+      description: 'HARDENING-5: Run CLI and verify no runtime exceptions',
+      code: '',
+      runCommand: cliEntryPoint.command,
+      timeout: 10000, // 10 second timeout
+    });
+
+    // If CLI has a --help flag pattern, test that too
+    if (cliEntryPoint.hasHelpFlag) {
+      tools.push({
+        id: 'cli-help-flag',
+        name: 'CLI --help works',
+        type: 'script',
+        description: 'Verify --help flag works without error',
+        code: '',
+        runCommand: cliEntryPoint.helpCommand,
+        timeout: 5000,
+      });
+    }
+
+    return tools;
+  }
+
+  /**
+   * Detect CLI entry points from files
+   *
+   * Checks for:
+   * 1. Files with shebang (#!/usr/bin/env node or #!/usr/bin/env tsx)
+   * 2. Files named index.ts, main.ts, cli.ts in src/ or root
+   * 3. package.json bin field pointing to files
+   * 4. Files containing common CLI patterns (process.argv, commander, yargs, etc.)
+   */
+  private async detectCliEntryPoint(
+    files: string[],
+    projectPath: string
+  ): Promise<{ file: string; command: string; hasHelpFlag: boolean; helpCommand: string } | null> {
+    // Priority order for CLI detection
+    const cliPatterns = [
+      /process\.argv/,
+      /import.*commander/,
+      /import.*yargs/,
+      /import.*meow/,
+      /\.option\s*\(/,
+      /\.command\s*\(/,
+      /parseArgs/,
+    ];
+
+    const helpPatterns = [
+      /--help/,
+      /-h\b/,
+      /\.help\s*\(/,
+      /showHelp/,
+    ];
+
+    // Check files for CLI patterns
+    for (const file of files) {
+      if (!file.endsWith('.ts') && !file.endsWith('.js')) continue;
+
+      try {
+        const content = await fs.readFile(file, 'utf-8');
+
+        // Check for shebang
+        const hasShebang = content.startsWith('#!/');
+
+        // Check for CLI patterns
+        const isCliFile = cliPatterns.some(pattern => pattern.test(content));
+
+        // Check for help flag support
+        const hasHelpFlag = helpPatterns.some(pattern => pattern.test(content));
+
+        // Prioritize: shebang > explicit CLI patterns > filename
+        if (hasShebang || isCliFile) {
+          const basename = path.basename(file);
+          const isTsFile = file.endsWith('.ts');
+
+          // Build run command
+          // For TypeScript, use tsx; for JS, use node
+          // Note: We do NOT use || true because we want to catch non-zero exit codes
+          // that indicate runtime failures (RangeError, TypeError, etc.)
+          const runner = isTsFile ? 'npx tsx' : 'node';
+          const command = `${runner} "${file}" 2>&1`;
+          const helpCommand = `${runner} "${file}" --help 2>&1`;
+
+          console.log(`[ValidationToolBuilder] CLI detected via ${hasShebang ? 'shebang' : 'patterns'}: ${basename}`);
+
+          return {
+            file,
+            command,
+            hasHelpFlag,
+            helpCommand,
+          };
+        }
+      } catch {
+        // Skip files we can't read
+        continue;
+      }
+    }
+
+    // Fallback: check for common CLI filenames
+    const cliFilenames = ['cli.ts', 'main.ts', 'index.ts', 'cli.js', 'main.js', 'index.js'];
+    for (const filename of cliFilenames) {
+      const matchingFiles = files.filter(f => path.basename(f) === filename);
+      if (matchingFiles.length > 0) {
+        const file = matchingFiles[0];
+        const isTsFile = file.endsWith('.ts');
+        const runner = isTsFile ? 'npx tsx' : 'node';
+
+        return {
+          file,
+          command: `${runner} "${file}" 2>&1`,
+          hasHelpFlag: false,
+          helpCommand: '',
+        };
+      }
+    }
+
+    return null;
   }
 
   // ============================================================================

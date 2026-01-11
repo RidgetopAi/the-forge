@@ -10,9 +10,13 @@
  *   npx tsx src/index.ts /workspace/projects/mandrel "add user authentication"
  */
 
+// Load .env file before anything else reads environment variables
+import 'dotenv/config';
+
 import { createPlantManager } from './departments/plant-manager.js';
 import { createPreparationForeman } from './departments/preparation.js';
 import { createExecutionForeman } from './departments/execution.js';
+import { TierRouter } from './tiers.js';
 import { createHumanSyncService, type GeneratedQuestion, type HumanSyncService } from './human-sync.js';
 import { taskManager } from './state.js';
 import { mandrel } from './mandrel.js';
@@ -29,6 +33,7 @@ import {
   type ExecutionTrace,
   type TraceStepName,
 } from './tracing.js';
+import { webSocketStreamer } from './websocket-streamer.js';
 
 // ============================================================================
 // Forge Engine
@@ -36,6 +41,7 @@ import {
 
 export class ForgeEngine {
   private instanceId: string;
+  private tierRouter: TierRouter; // INTEGRATION-3: Shared TierRouter for all departments
   private plantManager: ReturnType<typeof createPlantManager>;
   private preparationForeman: ReturnType<typeof createPreparationForeman>;
   private executionForeman: ReturnType<typeof createExecutionForeman>;
@@ -43,9 +49,14 @@ export class ForgeEngine {
 
   constructor(instanceId: string = 'forge-engine') {
     this.instanceId = instanceId;
+
+    // INTEGRATION-3: Create shared TierRouter for multi-provider LLM access
+    this.tierRouter = new TierRouter();
+    console.log('[ForgeEngine] TierRouter initialized (INTEGRATION-3)');
+
     this.plantManager = createPlantManager(instanceId);
-    this.preparationForeman = createPreparationForeman(instanceId);
-    this.executionForeman = createExecutionForeman(instanceId);
+    this.preparationForeman = createPreparationForeman(instanceId, this.tierRouter);
+    this.executionForeman = createExecutionForeman(instanceId, this.tierRouter);
     this.humanSyncService = createHumanSyncService(instanceId);
   }
 
@@ -88,6 +99,15 @@ export class ForgeEngine {
     console.log(`\nRequest: ${rawRequest}`);
     console.log(`Project: ${projectPath}\n`);
 
+    // Log WebSocket streaming status
+    const streamStatus = webSocketStreamer.getStatus();
+    if (streamStatus.enabled) {
+      console.log(`[WebSocket] Streaming ${streamStatus.connected ? 'CONNECTED' : 'DISCONNECTED'} to ${streamStatus.url}`);
+      if (streamStatus.queuedEvents > 0) {
+        console.log(`[WebSocket] ${streamStatus.queuedEvents} events queued`);
+      }
+    }
+
     // Connect to Mandrel
     const connected = await mandrel.ping();
     if (!connected) {
@@ -120,6 +140,17 @@ export class ForgeEngine {
       tracer.recordStep('classification', 'failure', 0, undefined, 'needs_human_sync');
       tracer.finalize('failure');
       await tracer.storeToMandrel();
+      
+      // Stream completion event
+      webSocketStreamer.streamCompletion(
+        intake.taskId,
+        false,
+        'classification',
+        undefined,
+        undefined,
+        tracer.getTrace()
+      );
+      
       return {
         success: false,
         taskId: intake.taskId,
@@ -153,6 +184,17 @@ export class ForgeEngine {
       tracer.endStep('failure', { urgency: 'critical' }, preCheckResult.question.question);
       tracer.finalize('failure');
       await tracer.storeToMandrel();
+      
+      // Stream completion event
+      webSocketStreamer.streamCompletion(
+        intake.taskId,
+        false,
+        'human-sync-required',
+        undefined,
+        undefined,
+        tracer.getTrace()
+      );
+      
       return {
         success: false,
         taskId: intake.taskId,
@@ -174,17 +216,65 @@ export class ForgeEngine {
     }
 
     // Phase 2: Preparation (Preparation Foreman)
+    // INTEGRATION-1: Now uses LLM-based workers via prepareWithLLM()
     console.log('\n' + '─'.repeat(40));
-    console.log('PHASE 2: PREPARATION (Foreman + Workers)');
+    console.log('PHASE 2: PREPARATION (Foreman + LLM Workers)');
     console.log('─'.repeat(40));
 
     tracer.startStep('preparation');
-    const preparation = await this.preparationForeman.prepare(intake.taskId, projectPath);
+
+    // Get task for rawRequest
+    const task = taskManager.getTask(intake.taskId);
+    if (!task) {
+      tracer.endStep('failure', undefined, 'Task not found');
+      tracer.finalize('failure');
+      await tracer.storeToMandrel();
+      return {
+        success: false,
+        taskId: intake.taskId,
+        stage: 'preparation',
+        result: { error: 'Task not found in state' },
+        trace: tracer.getTrace(),
+      };
+    }
+
+    // Transition to preparing state
+    taskManager.transitionState(intake.taskId, 'preparing', this.instanceId, 'Starting LLM-based preparation');
+
+    // Get historical context for learning retrieval
+    const historicalContext = await this.preparationForeman.getHistoricalContext(
+      task.rawRequest,
+      projectPath
+    );
+
+    // Use LLM-based preparation with wave dispatch
+    const preparation = await this.preparationForeman.prepareWithLLM(
+      task.rawRequest,
+      projectPath,
+      { historicalContext }
+    );
 
     if (!preparation.success) {
+      taskManager.transitionState(intake.taskId, 'failed', this.instanceId, preparation.error || 'Preparation failed');
       tracer.endStep('failure', undefined, preparation.error);
       tracer.finalize('failure');
       await tracer.storeToMandrel();
+      
+      // Stream error and completion
+      webSocketStreamer.streamError(
+        intake.taskId,
+        preparation.error || 'Preparation failed',
+        'preparation'
+      );
+      webSocketStreamer.streamCompletion(
+        intake.taskId,
+        false,
+        'preparation',
+        undefined,
+        undefined,
+        tracer.getTrace()
+      );
+      
       return {
         success: false,
         taskId: intake.taskId,
@@ -193,7 +283,21 @@ export class ForgeEngine {
         trace: tracer.getTrace(),
       };
     }
-    tracer.endStep('success', { mustReadFiles: preparation.package?.codeContext.mustRead.length });
+
+    // Store package on task state and transition to prepared
+    taskManager.setContextPackage(intake.taskId, preparation.package!);
+    taskManager.transitionState(intake.taskId, 'prepared', this.instanceId, 'LLM-based ContextPackage ready');
+
+    // Log preparation metrics
+    if (preparation.metrics) {
+      console.log(`[Preparation] LLM Workers: ${preparation.metrics.workerMetrics.workerCounts.succeeded} succeeded, ${preparation.metrics.workerMetrics.workerCounts.failed} failed`);
+      console.log(`[Preparation] Total cost: $${preparation.metrics.totalCostUsd.toFixed(4)}`);
+    }
+
+    tracer.endStep('success', {
+      mustReadFiles: preparation.package?.codeContext.mustRead.length,
+      prepCost: preparation.metrics?.totalCostUsd,
+    });
 
     // Phase 3: Quality Evaluation (NEW - i[7])
     console.log('\n' + '─'.repeat(40));
@@ -273,6 +377,17 @@ export class ForgeEngine {
         tracer.endStep('failure', { urgency: postCheckResult.question.urgency }, 'blocked_pre_execution');
         tracer.finalize('failure');
         await tracer.storeToMandrel();
+        
+        // Stream completion event
+        webSocketStreamer.streamCompletion(
+          intake.taskId,
+          true,
+          'prepared',
+          undefined,
+          qualityEval,
+          tracer.getTrace()
+        );
+        
         return {
           success: true,
           taskId: intake.taskId,
@@ -409,6 +524,21 @@ export class ForgeEngine {
 
       console.log(`\n[Trace] Stored trace ${trace.traceId.slice(0, 8)}... (${trace.steps.length} steps, ${trace.totalDurationMs}ms)`);
 
+      // Stream completion event
+      webSocketStreamer.streamCompletion(
+        intake.taskId,
+        execResult.success,
+        'executed',
+        {
+          success: execResult.success,
+          filesCreated: execResult.filesCreated,
+          filesModified: execResult.filesModified,
+          compilationPassed: execResult.compilationPassed,
+        },
+        qualityEval,
+        trace
+      );
+
       return {
         success: execResult.success,
         taskId: intake.taskId,
@@ -430,6 +560,16 @@ export class ForgeEngine {
     // i[29]: Still finalize trace for prep-only runs
     const trace = tracer.finalize('success');
     await tracer.storeToMandrel();
+
+    // Stream completion event for preparation-only
+    webSocketStreamer.streamCompletion(
+      intake.taskId,
+      true,
+      'prepared',
+      undefined,
+      qualityEval,
+      trace
+    );
 
     return {
       success: true,
@@ -1057,3 +1197,38 @@ export {
   type TraceStepName,
   type TraceStepStatus,
 } from './tracing.js';
+// Phase 6: FeedbackRouter exports (Intelligent Error Routing)
+export {
+  FeedbackRouter,
+  createFeedbackRouter,
+  type ErrorCategory,
+  type ErrorContext,
+  type FeedbackAction,
+  type FeedbackActionType,
+} from './feedback-router.js';
+// Phase 5: PatternTracker exports (Active Learning)
+export {
+  PatternTracker,
+  getPatternTracker,
+  createPatternTracker,
+  type PatternScore,
+} from './pattern-tracker.js';
+// Tier System exports
+export {
+  TierRouter,
+  type Tier,
+  type OperationType,
+  type TierCallOptions,
+  type TierCallResult,
+} from './tiers.js';
+// WebSocket Streaming exports
+export {
+  WebSocketStreamer,
+  createWebSocketStreamer,
+  webSocketStreamer,
+  type WebSocketEvent,
+  type PhaseTransitionEvent,
+  type ProgressUpdateEvent,
+  type TraceStepEvent,
+  type CompletionEvent,
+} from './websocket-streamer.js';

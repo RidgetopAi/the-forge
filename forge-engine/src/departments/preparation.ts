@@ -19,7 +19,52 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+// Phase 4: LLM-based workers (replacing shell-command workers)
+import { TierRouter } from '../tiers.js';
+import {
+  FileDiscoveryWorker as LLMFileDiscoveryWorker,
+  PatternExtractionWorker as LLMPatternExtractionWorker,
+  DependencyMapperWorker as LLMDependencyMapperWorker,
+  ConstraintIdentifierWorker as LLMConstraintIdentifierWorker,
+  WebResearchWorker as LLMWebResearchWorker,
+  DocumentationReaderWorker as LLMDocumentationReaderWorker,
+  FileDiscoveryOutput,
+  PatternExtractionOutput,
+  DependencyMappingOutput,
+  ConstraintIdentificationOutput,
+  WebResearchOutput,
+  DocumentationReadingOutput,
+} from '../workers/index.js';
+
 const execAsync = promisify(exec);
+
+// ============================================================================
+// Phase 4: Worker Results Type
+// ============================================================================
+
+/**
+ * Aggregated results from all LLM workers.
+ * Used to collect output from wave-based parallel execution.
+ */
+interface WorkerResultsType {
+  // Wave 1 results
+  fileDiscovery?: FileDiscoveryOutput;
+  constraintIdentification?: ConstraintIdentificationOutput;
+  // Wave 2 results
+  patternExtraction?: PatternExtractionOutput;
+  dependencyMapping?: DependencyMappingOutput;
+  // Wave 3 results (optional)
+  webResearch?: WebResearchOutput;
+  documentationReading?: DocumentationReadingOutput;
+  // Aggregated metrics
+  metrics: {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    totalLatencyMs: number;
+    workerCounts: { succeeded: number; failed: number };
+  };
+}
 
 // ============================================================================
 // Task Type Detection & Content Generation (i[10] contribution)
@@ -306,1127 +351,620 @@ interface ArchitectureAnalysisResult {
 }
 
 // ============================================================================
-// Workers (specialized task agents)
-// ============================================================================
-
-/**
- * i[9] fix: Task-type-aware file discovery
- * i[11] enhancement: Explicit reference extraction
- *
- * The original implementation searched file CONTENTS for ALL keywords,
- * which caused noise: "add a simple README" matched llm.ts because it
- * contains the word "simple".
- *
- * New approach (5 strategies, ordered by priority):
- * 0. Explicit reference extraction (i[11]) - files/types/classes explicitly mentioned
- * 0.5. Pattern inference (i[12]) - when adding "new X", find existing X implementations
- * 1. Task-type specific files (README task → .md files, docs/, package.json)
- * 2. Path-based matching (file NAMES contain keywords)
- * 3. Content matching with filtered keywords (skip "code noise" words)
- *
- * i[11] insight: When a task says "follow the pattern in preparation.ts",
- * that's an EXPLICIT reference that must be in mustRead. Keyword matching
- * doesn't catch this - we need to extract file paths, type names, and
- * class names from the task description and resolve them to actual files.
- *
- * i[12] insight: When a task says "add the Execution Department", we should
- * automatically find existing Department implementations as patterns, even
- * if they weren't explicitly mentioned. This closes the gap between explicit
- * references and generic keyword matching.
- */
-class FileDiscoveryWorker {
-  // Words that appear commonly in code but aren't meaningful for file discovery
-  // These should NOT be used for content-based file search
-  private static CODE_NOISE_WORDS = new Set([
-    'simple', 'new', 'file', 'data', 'value', 'type', 'name', 'get', 'set',
-    'list', 'item', 'result', 'error', 'message', 'string', 'number', 'boolean',
-    'function', 'method', 'class', 'object', 'array', 'return', 'true', 'false',
-    'null', 'undefined', 'const', 'let', 'var', 'async', 'await', 'export',
-    'import', 'default', 'interface', 'config', 'options', 'params', 'args',
-  ]);
-
-  /**
-   * Discover relevant files for a task in a codebase
-   *
-   * i[9] refactored: Now uses multi-strategy approach
-   * i[11] enhanced: Added explicit reference extraction as Strategy 0
-   */
-  async discover(
-    projectPath: string,
-    keywords: string[],
-    projectType: ProjectType,
-    taskDescription: string = ''  // Added for task-type detection
-  ): Promise<FileDiscoveryResult> {
-    console.log(`[Worker:FileDiscovery] Scanning ${projectPath}`);
-    console.log(`[Worker:FileDiscovery] Keywords: ${keywords.join(', ')}`);
-
-    // Get directory structure (expanded to include more file types)
-    let directoryStructure = '';
-    try {
-      const { stdout } = await execAsync(
-        `find "${projectPath}" -type f \\( -name "*.ts" -o -name "*.js" -o -name "*.tsx" -o -name "*.jsx" -o -name "*.md" -o -name "*.json" \\) ! -path "*/node_modules/*" | head -50`,
-        { timeout: 10000 }
-      );
-      directoryStructure = stdout;
-    } catch {
-      directoryStructure = 'Unable to scan directory';
-    }
-
-    const relevantFiles: FileDiscoveryResult['relevantFiles'] = [];
-
-    // Strategy 0 (i[11]): Explicit reference extraction (HIGHEST priority)
-    // Extract file paths, type names, and class names directly mentioned in task
-    console.log('[Worker:FileDiscovery] Strategy 0: Explicit reference extraction (i[11])');
-    const explicitRefs = await this.discoverByExplicitReferences(projectPath, taskDescription);
-    for (const file of explicitRefs) {
-      if (!relevantFiles.find(f => f.path === file.path)) {
-        relevantFiles.push({ ...file, priority: 'high' });
-      }
-    }
-
-    // Strategy 0.5 (i[12]): Pattern inference
-    // When task says "add new X", find existing X implementations as patterns
-    console.log('[Worker:FileDiscovery] Strategy 0.5: Pattern inference (i[12])');
-    const patternRefs = await this.discoverByPatternInference(projectPath, taskDescription);
-    for (const file of patternRefs) {
-      if (!relevantFiles.find(f => f.path === file.path)) {
-        relevantFiles.push({ ...file, priority: 'high' });
-      }
-    }
-
-    // Strategy 1: Task-type specific files (highest priority)
-    console.log('[Worker:FileDiscovery] Strategy 1: Task-type specific files');
-    const taskTypeFiles = await this.discoverByTaskType(projectPath, taskDescription, keywords);
-    for (const file of taskTypeFiles) {
-      if (!relevantFiles.find(f => f.path === file.path)) {
-        relevantFiles.push({ ...file, priority: 'high' });
-      }
-    }
-
-    // Strategy 2: Path-based matching (file/directory names)
-    console.log('[Worker:FileDiscovery] Strategy 2: Path-based matching');
-    const pathFiles = await this.discoverByPath(projectPath, keywords);
-    for (const file of pathFiles) {
-      const existing = relevantFiles.find(f => f.path === file.path);
-      if (existing) {
-        existing.priority = 'high'; // Multiple strategies matched = high priority
-      } else {
-        relevantFiles.push({ ...file, priority: 'high' });
-      }
-    }
-
-    // Strategy 3: Content matching with filtered keywords (lowest priority)
-    // Only use keywords that aren't "code noise"
-    const meaningfulKeywords = keywords.filter(k => !FileDiscoveryWorker.CODE_NOISE_WORDS.has(k));
-    if (meaningfulKeywords.length > 0) {
-      console.log(`[Worker:FileDiscovery] Strategy 3: Content matching with: ${meaningfulKeywords.join(', ')}`);
-      const contentFiles = await this.discoverByContent(projectPath, meaningfulKeywords);
-      for (const file of contentFiles) {
-        const existing = relevantFiles.find(f => f.path === file.path);
-        if (existing) {
-          existing.priority = 'high';
-        } else {
-          relevantFiles.push({ ...file, priority: 'medium' });
-        }
-      }
-    } else {
-      console.log('[Worker:FileDiscovery] Strategy 3: Skipped (all keywords are code noise)');
-    }
-
-    // i[11] fix: Filter out directories and non-code files from mustRead
-    // The path-based matching often adds directories and irrelevant files
-    const filteredFiles = await this.filterRelevantFiles(relevantFiles, projectPath);
-
-    console.log(`[Worker:FileDiscovery] Found ${filteredFiles.length} relevant files (after filtering)`);
-    return { relevantFiles: filteredFiles, directoryStructure };
-  }
-
-  /**
-   * i[11] addition: Filter out directories and non-relevant files from results.
-   *
-   * The path-based matching strategy often includes:
-   * - Directories (not files)
-   * - dist/ compiled output
-   * - Non-code files like Dockerfile when task is about TypeScript
-   *
-   * This filter ensures mustRead contains actual readable code files.
-   */
-  private async filterRelevantFiles(
-    files: FileDiscoveryResult['relevantFiles'],
-    projectPath: string
-  ): Promise<FileDiscoveryResult['relevantFiles']> {
-    const filtered: FileDiscoveryResult['relevantFiles'] = [];
-
-    for (const file of files) {
-      // Skip if it's a directory
-      try {
-        const stats = await fs.stat(file.path);
-        if (stats.isDirectory()) {
-          console.log(`[Worker:FileDiscovery] Filtering out directory: ${file.path}`);
-          continue;
-        }
-      } catch {
-        // File doesn't exist, skip it
-        continue;
-      }
-
-      // Skip dist/ compiled output
-      if (file.path.includes('/dist/')) {
-        console.log(`[Worker:FileDiscovery] Filtering out dist file: ${file.path}`);
-        continue;
-      }
-
-      // Skip non-code files for code tasks (unless explicitly referenced)
-      const isExplicitReference = file.reason.includes('Explicitly referenced') ||
-        file.reason.includes('Defines type/class') ||
-        file.reason.includes('Defines function');
-
-      if (!isExplicitReference) {
-        // Check if it's a code file
-        const codeExtensions = ['.ts', '.tsx', '.js', '.jsx', '.json', '.md'];
-        const hasCodeExtension = codeExtensions.some(ext => file.path.endsWith(ext));
-
-        // Skip Dockerfile and similar unless explicitly mentioned
-        const basename = path.basename(file.path);
-        const nonCodeFiles = ['Dockerfile', '.gitignore', '.env', '.env.example'];
-        if (nonCodeFiles.includes(basename)) {
-          console.log(`[Worker:FileDiscovery] Filtering out non-code file: ${file.path}`);
-          continue;
-        }
-
-        if (!hasCodeExtension) {
-          console.log(`[Worker:FileDiscovery] Filtering out non-code extension: ${file.path}`);
-          continue;
-        }
-      }
-
-      filtered.push(file);
-    }
-
-    return filtered;
-  }
-
-  /**
-   * Strategy 0 (i[11]): Discover files by explicit references in task description
-   *
-   * This strategy extracts:
-   * 1. File paths mentioned directly (e.g., "preparation.ts", "src/index.ts")
-   * 2. Type/interface names (e.g., "ContextPackage") → resolve to definition file
-   * 3. Class names (e.g., "PreparationForeman") → resolve to definition file
-   *
-   * This solves the problem where a task says "follow the pattern in preparation.ts"
-   * but keyword matching doesn't find preparation.ts because "preparation" isn't
-   * a keyword in the stopword-filtered list.
-   */
-  private async discoverByExplicitReferences(
-    projectPath: string,
-    taskDescription: string
-  ): Promise<Array<{ path: string; reason: string }>> {
-    const files: Array<{ path: string; reason: string }> = [];
-
-    if (!taskDescription) return files;
-
-    // 1. Extract explicit file paths (.ts, .tsx, .js, .jsx, .md, .json, .yaml, .yml)
-    // Match patterns like "preparation.ts", "src/departments/execution.ts", etc.
-    const filePatterns = taskDescription.match(
-      /(?:^|[\s"'`(,])([a-zA-Z0-9_\-./]+\.(?:ts|tsx|js|jsx|md|json|yaml|yml))(?:[\s"'`),]|$)/gi
-    ) || [];
-
-    for (const match of filePatterns) {
-      // Clean up the match (remove surrounding whitespace/punctuation)
-      const fileName = match.replace(/^[\s"'`(,]+|[\s"'`),]+$/g, '');
-      if (fileName.length < 3) continue;
-
-      // Try to find this file in the project
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -type f -name "${path.basename(fileName)}" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -3`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          // Prefer paths that match the full specified path, not just basename
-          if (fileName.includes('/') && !foundPath.includes(fileName.replace(/^\//, ''))) {
-            continue;
-          }
-          files.push({
-            path: foundPath,
-            reason: `Explicitly referenced in task: "${fileName}"`,
-          });
-        }
-      } catch { /* ignore */ }
-    }
-
-    // 2. Extract PascalCase type/class names (likely TypeScript types or classes)
-    // Match patterns like "ContextPackage", "PreparationForeman", etc.
-    const pascalCaseNames = taskDescription.match(/\b([A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+)\b/g) || [];
-
-    // Deduplicate and filter out common false positives
-    const falsePascalCase = new Set(['README', 'TODO', 'FIXME', 'JSON', 'API', 'URL', 'HTML', 'CSS', 'SQL', 'HTTP', 'HTTPS']);
-    const uniqueNames = [...new Set(pascalCaseNames)].filter(n => !falsePascalCase.has(n));
-
-    for (const name of uniqueNames) {
-      // Search for files that define this type/class
-      // Look for various definition patterns:
-      // - "interface Name", "type Name =", "class Name"
-      // - "export const Name", "export type Name", "export class Name"
-      // - "export { Name }", etc.
-      try {
-        const { stdout } = await execAsync(
-          `rg -l "(interface|type|class|const|let|var|function)\\s+${name}\\b|export\\s+.*${name}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -3`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === foundPath)) {
-            files.push({
-              path: foundPath,
-              reason: `Defines type/class "${name}" referenced in task`,
-            });
-          }
-        }
-      } catch { /* ignore - rg might not find anything */ }
-    }
-
-    // 3. Extract camelCase identifiers that might be important function/method names
-    // Match patterns like "createForgeEngine", "prepareContext", etc.
-    // Only include if they're likely to be definitions (not common verbs)
-    const camelCasePatterns = taskDescription.match(/\b(create|build|make|get|set|init|handle|process)[A-Z][a-zA-Z0-9]+\b/g) || [];
-
-    for (const name of [...new Set(camelCasePatterns)]) {
-      try {
-        const { stdout } = await execAsync(
-          `rg -l "(?:function|const|let|export)\\s+${name}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -2`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === foundPath)) {
-            files.push({
-              path: foundPath,
-              reason: `Defines function "${name}" referenced in task`,
-            });
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    console.log(`[Worker:FileDiscovery] Strategy 0: Found ${files.length} explicit references`);
-    return files;
-  }
-
-  /**
-   * Strategy 0.5 (i[12]): Discover existing implementations when creating something new.
-   *
-   * When a task says "add the Execution Department" or "create a new Worker",
-   * this strategy finds existing implementations of the same concept to use
-   * as patterns.
-   *
-   * Key insight: The explicit reference extraction (Strategy 0) only works when
-   * the task explicitly names files. But when asked to "add a new Department",
-   * developers expect the system to find existing Department implementations
-   * as examples to follow.
-   *
-   * Pattern matching approach:
-   * 1. Detect "add/create/implement/build new [Concept]" patterns
-   * 2. Extract the Concept (e.g., "Department", "Worker", "Foreman", "Component")
-   * 3. Search for existing files/classes that match this Concept
-   * 4. Return them as "existing pattern to follow"
-   */
-  private async discoverByPatternInference(
-    projectPath: string,
-    taskDescription: string
-  ): Promise<Array<{ path: string; reason: string }>> {
-    const files: Array<{ path: string; reason: string }> = [];
-
-    if (!taskDescription) return files;
-
-    const lower = taskDescription.toLowerCase();
-
-    // Detect "add/create/implement new [Concept]" patterns
-    // Match patterns like:
-    // - "add the Execution Department"
-    // - "create a new Worker"
-    // - "implement a Foreman"
-    // - "build the Documentation Department"
-    const addPatterns = [
-      /(?:add|create|implement|build|make|write)\s+(?:a\s+)?(?:new\s+)?(?:the\s+)?(\w+)\s+(department|worker|foreman|component|service|handler|manager|controller|module)/gi,
-      /(?:add|create|implement|build|make|write)\s+(?:a\s+)?(?:new\s+)?(?:the\s+)?(\w+(?:department|worker|foreman|component|service|handler|manager|controller|module))/gi,
-    ];
-
-    const conceptsToFind: Set<string> = new Set();
-
-    for (const pattern of addPatterns) {
-      let match;
-      while ((match = pattern.exec(taskDescription)) !== null) {
-        // Extract the type of thing being created (e.g., "Department", "Worker")
-        if (match[2]) {
-          conceptsToFind.add(match[2].toLowerCase());
-        }
-        // Also check for combined words like "ExecutionDepartment"
-        if (match[1]) {
-          const combined = match[1].toLowerCase();
-          for (const suffix of ['department', 'worker', 'foreman', 'component', 'service', 'handler', 'manager', 'controller', 'module']) {
-            if (combined.endsWith(suffix)) {
-              conceptsToFind.add(suffix);
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    // Also check for standalone mentions of architectural concepts in creation context
-    const architecturalConcepts = ['department', 'foreman', 'worker', 'component', 'service', 'handler', 'manager', 'controller', 'module'];
-    for (const concept of architecturalConcepts) {
-      // Check if this concept is mentioned in a creation context
-      const creationWords = ['add', 'create', 'implement', 'build', 'new', 'make', 'write'];
-      for (const word of creationWords) {
-        if (lower.includes(word) && lower.includes(concept)) {
-          conceptsToFind.add(concept);
-          break;
-        }
-      }
-    }
-
-    console.log(`[Worker:FileDiscovery] Strategy 0.5: Concepts to find patterns for: ${[...conceptsToFind].join(', ') || 'none'}`);
-
-    // For each concept, find existing implementations
-    for (const concept of conceptsToFind) {
-      // Strategy 1: Find files in directories named after the concept
-      // e.g., "department" → look in /departments/ directory
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -type f -path "*/${concept}s/*" -name "*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === foundPath)) {
-            files.push({
-              path: foundPath,
-              reason: `Existing ${concept} implementation (pattern to follow)`,
-            });
-          }
-        }
-      } catch { /* ignore */ }
-
-      // Strategy 2: Find classes/types that end with the concept
-      // e.g., "Foreman" → find "PreparationForeman", "QualityForeman"
-      const capitalizedConcept = concept.charAt(0).toUpperCase() + concept.slice(1);
-      try {
-        const { stdout } = await execAsync(
-          `rg -l "class\\s+\\w+${capitalizedConcept}\\b|interface\\s+\\w+${capitalizedConcept}\\b" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -3`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === foundPath)) {
-            files.push({
-              path: foundPath,
-              reason: `Existing ${capitalizedConcept} class (pattern to follow)`,
-            });
-          }
-        }
-      } catch { /* ignore */ }
-
-      // Strategy 3: Find files named after the concept
-      // e.g., "worker" → find "*worker*.ts", "*Worker*.ts"
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -type f -iname "*${concept}*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -3`,
-          { timeout: 5000 }
-        );
-
-        for (const foundPath of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === foundPath)) {
-            files.push({
-              path: foundPath,
-              reason: `File with "${concept}" in name (possible pattern)`,
-            });
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    console.log(`[Worker:FileDiscovery] Strategy 0.5: Found ${files.length} pattern inference files`);
-    return files;
-  }
-
-  /**
-   * Strategy 1: Discover files based on task type
-   *
-   * For documentation tasks → look for .md files, docs/, package.json
-   * For test tasks → look for test files, __tests__ directories
-   * etc.
-   */
-  private async discoverByTaskType(
-    projectPath: string,
-    taskDescription: string,
-    keywords: string[]
-  ): Promise<Array<{ path: string; reason: string }>> {
-    const lower = (taskDescription || keywords.join(' ')).toLowerCase();
-    const files: Array<{ path: string; reason: string }> = [];
-
-    // Documentation task detection
-    if (lower.includes('readme') || lower.includes('documentation') || lower.includes('docs')) {
-      console.log('[Worker:FileDiscovery] Detected: Documentation task');
-
-      // Find existing README files
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -maxdepth 2 -iname "readme*" -o -iname "*.md" 2>/dev/null | head -5`,
-          { timeout: 5000 }
-        );
-        for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          files.push({ path: file, reason: 'Existing documentation file' });
-        }
-      } catch { /* ignore */ }
-
-      // Find package.json for project metadata
-      try {
-        await fs.access(path.join(projectPath, 'package.json'));
-        files.push({ path: path.join(projectPath, 'package.json'), reason: 'Project metadata' });
-      } catch { /* ignore */ }
-
-      // Find docs directory
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -maxdepth 2 -type d -iname "docs" -o -iname "documentation" 2>/dev/null | head -1`,
-          { timeout: 5000 }
-        );
-        if (stdout.trim()) {
-          files.push({ path: stdout.trim(), reason: 'Documentation directory' });
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Test task detection
-    if (lower.includes('test') || lower.includes('spec')) {
-      console.log('[Worker:FileDiscovery] Detected: Testing task');
-
-      try {
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -type f \\( -name "*.test.ts" -o -name "*.spec.ts" -o -name "*.test.js" \\) ! -path "*/node_modules/*" 2>/dev/null | head -10`,
-          { timeout: 5000 }
-        );
-        for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          files.push({ path: file, reason: 'Test file' });
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Config task detection
-    if (lower.includes('config') || lower.includes('setting') || lower.includes('setup')) {
-      console.log('[Worker:FileDiscovery] Detected: Configuration task');
-
-      const configPatterns = ['tsconfig.json', 'package.json', '.eslintrc*', '.prettierrc*', 'jest.config.*', 'vite.config.*'];
-      for (const pattern of configPatterns) {
-        try {
-          const { stdout } = await execAsync(
-            `find "${projectPath}" -maxdepth 1 -name "${pattern}" 2>/dev/null | head -3`,
-            { timeout: 3000 }
-          );
-          for (const file of stdout.trim().split('\n').filter(Boolean)) {
-            files.push({ path: file, reason: 'Configuration file' });
-          }
-        } catch { /* ignore */ }
-      }
-    }
-
-    // i[23]: API/endpoint task detection
-    // When task mentions endpoint, route, API, HTTP - find server/route files
-    if (lower.includes('endpoint') || lower.includes('route') || lower.includes('api') ||
-        lower.includes('http') || lower.includes('rest') || lower.includes('handler')) {
-      console.log('[Worker:FileDiscovery] Detected: API/endpoint task');
-
-      // Find server entry points and route files
-      const apiPatterns = ['server.ts', 'app.ts', 'routes.ts', 'api.ts', 'index.ts', 'main.ts'];
-      for (const pattern of apiPatterns) {
-        try {
-          const { stdout } = await execAsync(
-            `find "${projectPath}" -type f -name "${pattern}" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
-            { timeout: 3000 }
-          );
-          for (const file of stdout.trim().split('\n').filter(Boolean)) {
-            files.push({ path: file, reason: `API server/route file: ${pattern}` });
-          }
-        } catch { /* ignore */ }
-      }
-
-      // Find files in API-related directories
-      const apiDirs = ['api', 'routes', 'controllers', 'handlers', 'endpoints'];
-      for (const dir of apiDirs) {
-        try {
-          const { stdout } = await execAsync(
-            `find "${projectPath}" -type f -path "*/${dir}/*" -name "*.ts" ! -path "*/node_modules/*" ! -path "*/dist/*" 2>/dev/null | head -5`,
-            { timeout: 3000 }
-          );
-          for (const file of stdout.trim().split('\n').filter(Boolean)) {
-            if (!files.find(f => f.path === file)) {
-              files.push({ path: file, reason: `File in ${dir}/ directory` });
-            }
-          }
-        } catch { /* ignore */ }
-      }
-
-      // Find files containing Express route definitions
-      try {
-        const { stdout } = await execAsync(
-          `rg -l "app\\.(get|post|put|delete|patch)\\(" "${projectPath}" --type ts 2>/dev/null | grep -v node_modules | grep -v dist | head -5`,
-          { timeout: 5000 }
-        );
-        for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === file)) {
-            files.push({ path: file, reason: 'Contains Express route definitions' });
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    return files;
-  }
-
-  /**
-   * Strategy 2: Discover files by path matching
-   *
-   * Searches for files/directories whose NAMES contain keywords.
-   * This is more reliable than content matching for finding related files.
-   */
-  private async discoverByPath(
-    projectPath: string,
-    keywords: string[]
-  ): Promise<Array<{ path: string; reason: string }>> {
-    const files: Array<{ path: string; reason: string }> = [];
-
-    for (const keyword of keywords) {
-      if (keyword.length < 3) continue; // Skip very short keywords
-
-      try {
-        // Search for files/directories with keyword in name
-        const { stdout } = await execAsync(
-          `find "${projectPath}" -iname "*${keyword}*" ! -path "*/node_modules/*" 2>/dev/null | head -5`,
-          { timeout: 5000 }
-        );
-
-        for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === file)) {
-            files.push({ path: file, reason: `Name contains "${keyword}"` });
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    return files;
-  }
-
-  /**
-   * Strategy 3: Discover files by content matching
-   *
-   * Searches for keywords inside file contents.
-   * Only used for "meaningful" keywords (not code noise).
-   */
-  private async discoverByContent(
-    projectPath: string,
-    keywords: string[]
-  ): Promise<Array<{ path: string; reason: string }>> {
-    const files: Array<{ path: string; reason: string }> = [];
-
-    for (const keyword of keywords) {
-      try {
-        const { stdout } = await execAsync(
-          `rg -l -i "${keyword}" "${projectPath}" --type ts --type js --type md 2>/dev/null | grep -v node_modules | head -5`,
-          { timeout: 10000 }
-        );
-
-        for (const file of stdout.trim().split('\n').filter(Boolean)) {
-          if (!files.find(f => f.path === file)) {
-            files.push({ path: file, reason: `Content contains "${keyword}"` });
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    return files;
-  }
-}
-
-class PatternExtractionWorker {
-  /**
-   * Extract coding patterns from a codebase
-   */
-  async extract(projectPath: string): Promise<PatternExtractionResult> {
-    console.log(`[Worker:PatternExtraction] Analyzing patterns in ${projectPath}`);
-
-    // Check for config files
-    const configs: string[] = [];
-    const configFiles = ['tsconfig.json', 'package.json', '.eslintrc', '.prettierrc', 'jest.config.js'];
-
-    for (const config of configFiles) {
-      try {
-        await fs.access(path.join(projectPath, config));
-        configs.push(config);
-      } catch {
-        // File doesn't exist
-      }
-    }
-
-    // Infer patterns from structure
-    let testingApproach = 'Unknown';
-    try {
-      const { stdout } = await execAsync(`ls -la "${projectPath}" 2>/dev/null`);
-      if (stdout.includes('jest') || stdout.includes('__tests__')) {
-        testingApproach = 'Jest';
-      } else if (stdout.includes('vitest')) {
-        testingApproach = 'Vitest';
-      } else if (stdout.includes('mocha')) {
-        testingApproach = 'Mocha';
-      }
-    } catch {
-      // Ignore
-    }
-
-    // Check package.json for more info
-    let namingConventions = 'camelCase (TypeScript default)';
-    let fileOrganization = 'Unknown';
-
-    try {
-      const pkgPath = path.join(projectPath, 'package.json');
-      const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'));
-
-      if (pkg.type === 'module') {
-        fileOrganization = 'ES Modules';
-      }
-
-      if (pkg.scripts?.test) {
-        testingApproach = pkg.scripts.test.includes('jest')
-          ? 'Jest'
-          : pkg.scripts.test.includes('vitest')
-          ? 'Vitest'
-          : testingApproach;
-      }
-    } catch {
-      // No package.json or parse error
-    }
-
-    return {
-      namingConventions,
-      fileOrganization,
-      testingApproach,
-      errorHandling: 'Standard try/catch with typed errors',
-      codeStyle: configs,
-    };
-  }
-}
-
-class ArchitectureAnalysisWorker {
-  /**
-   * Analyze the architecture of a codebase
-   */
-  async analyze(
-    projectPath: string,
-    relevantFiles: string[]
-  ): Promise<ArchitectureAnalysisResult> {
-    console.log(`[Worker:Architecture] Analyzing ${relevantFiles.length} files`);
-
-    const components: ArchitectureAnalysisResult['components'] = [];
-    const dependencies: string[] = [];
-
-    // Read package.json for dependencies
-    try {
-      const pkgPath = path.join(projectPath, 'package.json');
-      const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'));
-
-      dependencies.push(...Object.keys(pkg.dependencies ?? {}));
-      dependencies.push(...Object.keys(pkg.devDependencies ?? {}).map(d => `${d} (dev)`));
-    } catch {
-      // Ignore
-    }
-
-    // Analyze file structure to identify components
-    const dirCounts: Record<string, number> = {};
-    for (const file of relevantFiles) {
-      const dir = path.dirname(file).replace(projectPath, '').split('/')[1] ?? 'root';
-      dirCounts[dir] = (dirCounts[dir] ?? 0) + 1;
-    }
-
-    for (const [dir, count] of Object.entries(dirCounts)) {
-      if (count >= 1) {
-        components.push({
-          name: dir,
-          purpose: `Contains ${count} relevant file(s)`,
-          location: path.join(projectPath, dir),
-        });
-      }
-    }
-
-    return {
-      overview: `Project with ${relevantFiles.length} relevant files across ${components.length} components`,
-      components,
-      dependencies: dependencies.slice(0, 20), // Top 20
-    };
-  }
-}
-
-// ============================================================================
 // Preparation Foreman
 // ============================================================================
 
 export class PreparationForeman {
   private instanceId: string;
-  private fileWorker: FileDiscoveryWorker;
-  private patternWorker: PatternExtractionWorker;
-  private architectureWorker: ArchitectureAnalysisWorker;
   private learningRetriever: LearningRetriever;
-  private contentGenerator: TaskTypeContentGenerator; // i[10]: Task-type-aware content
+  // INTEGRATION-5: Removed shell-based workers (FileDiscoveryWorker, PatternExtractionWorker, ArchitectureAnalysisWorker)
+  // Now using LLM-based workers exclusively via TierRouter
 
-  constructor(instanceId: string) {
+  // LLM-based workers via TierRouter
+  private tierRouter: TierRouter;
+  private llmWorkers: {
+    fileDiscovery: LLMFileDiscoveryWorker;
+    patternExtraction: LLMPatternExtractionWorker;
+    dependencyMapper: LLMDependencyMapperWorker;
+    constraintIdentifier: LLMConstraintIdentifierWorker;
+    webResearch: LLMWebResearchWorker;
+    documentationReader: LLMDocumentationReaderWorker;
+  };
+
+  constructor(instanceId: string, tierRouter?: TierRouter) {
     this.instanceId = instanceId;
-    this.fileWorker = new FileDiscoveryWorker();
-    this.patternWorker = new PatternExtractionWorker();
-    this.architectureWorker = new ArchitectureAnalysisWorker();
     this.learningRetriever = createLearningRetriever(instanceId);
-    this.contentGenerator = new TaskTypeContentGenerator(); // i[10]
+
+    // INTEGRATION-5: Removed shell-based worker initialization
+    // Initialize TierRouter and LLM workers
+    this.tierRouter = tierRouter ?? new TierRouter();
+    this.llmWorkers = {
+      fileDiscovery: new LLMFileDiscoveryWorker(this.tierRouter),
+      patternExtraction: new LLMPatternExtractionWorker(this.tierRouter),
+      dependencyMapper: new LLMDependencyMapperWorker(this.tierRouter),
+      constraintIdentifier: new LLMConstraintIdentifierWorker(this.tierRouter),
+      webResearch: new LLMWebResearchWorker(this.tierRouter),
+      documentationReader: new LLMDocumentationReaderWorker(this.tierRouter),
+    };
   }
 
   /**
-   * Execute the 7-phase preparation protocol
+   * Get historical context for a task.
    *
-   * Returns a complete ContextPackage ready for execution.
+   * INTEGRATION-1: Exposed for index.ts to pass to prepareWithLLM.
+   * Previously only used internally by prepare().
    */
-  async prepare(
-    taskId: string,
+  async getHistoricalContext(
+    taskDescription: string,
     projectPath: string
-  ): Promise<{ success: boolean; package?: ContextPackage; error?: string }> {
-    const task = taskManager.getTask(taskId);
-    if (!task || !task.classification) {
-      return { success: false, error: 'Task not found or not classified' };
+  ): Promise<HistoricalContext> {
+    return this.learningRetriever.retrieve(taskDescription, projectPath);
+  }
+
+  // ============================================================================
+  // Phase 4: Wave-Based Parallel Worker Dispatch
+  // ============================================================================
+
+  /**
+   * Results from all LLM workers, collected by wave.
+   */
+  private workerResults?: WorkerResultsType;
+
+  /**
+   * Execute LLM workers in parallel waves.
+   *
+   * Wave 1 (Independent - run in parallel):
+   * - FileDiscoveryWorker: Discovers relevant files
+   * - ConstraintIdentifierWorker: Identifies project constraints
+   *
+   * Wave 2 (Depends on Wave 1 - run in parallel):
+   * - PatternExtractionWorker: Extracts coding patterns (needs fileDiscovery results)
+   * - DependencyMapperWorker: Maps file dependencies (needs fileDiscovery results)
+   *
+   * Wave 3 (Optional, based on task type):
+   * - WebResearchWorker: If task needs external research
+   * - DocumentationReaderWorker: If task has documentation to analyze
+   *
+   * @param taskDescription - The task to prepare for
+   * @param projectPath - Root path of the project
+   * @param options - Optional configuration for wave execution
+   */
+  async executeWaveBasedWorkers(
+    taskDescription: string,
+    projectPath: string,
+    options?: {
+      needsWebResearch?: boolean;
+      documentation?: string;
     }
+  ): Promise<{
+    success: boolean;
+    results?: WorkerResultsType;
+    error?: string;
+  }> {
+    console.log('[Foreman:Preparation] Starting wave-based worker dispatch');
 
-    console.log(`[Foreman:Preparation] Starting preparation for task ${taskId}`);
-    console.log(`[Foreman:Preparation] Type: ${task.classification.projectType}, Scope: ${task.classification.scope}`);
+    // Initialize metrics
+    const metrics = {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostUsd: 0,
+      totalLatencyMs: 0,
+      workerCounts: { succeeded: 0, failed: 0 },
+    };
 
-    // Transition to preparing state
-    taskManager.transitionState(taskId, 'preparing', this.instanceId, 'Starting preparation');
+    const results: NonNullable<typeof this.workerResults> = { metrics };
+
+    // Helper to accumulate metrics
+    const accumulateMetrics = (workerMetrics: {
+      inputTokens: number;
+      outputTokens: number;
+      costUsd: number;
+      latencyMs: number;
+    }) => {
+      metrics.totalInputTokens += workerMetrics.inputTokens;
+      metrics.totalOutputTokens += workerMetrics.outputTokens;
+      metrics.totalCostUsd += workerMetrics.costUsd;
+      metrics.totalLatencyMs += workerMetrics.latencyMs;
+    };
 
     try {
-      // Phase 1: Already done by Plant Manager (classification)
-      console.log('[Foreman:Preparation] Phase 1: Classification complete');
+      // =======================================================================
+      // Wave 1: Independent workers (run in parallel)
+      // =======================================================================
+      console.log('[Foreman:Preparation] Wave 1: FileDiscovery + ConstraintIdentifier (parallel)');
+      const wave1Start = Date.now();
 
-      // Phase 2: Architectural Discovery
-      console.log('[Foreman:Preparation] Phase 2: Architectural Discovery');
+      const [fileDiscoveryResult, constraintResult] = await Promise.all([
+        this.llmWorkers.fileDiscovery.execute({
+          task: taskDescription,
+          projectRoot: projectPath,
+        }),
+        this.llmWorkers.constraintIdentifier.execute({
+          task: taskDescription,
+          projectRoot: projectPath,
+        }),
+      ]);
 
-      // Extract keywords from request
-      const keywords = this.extractKeywords(task.rawRequest);
-      console.log(`[Foreman:Preparation] Keywords: ${keywords.join(', ')}`);
+      const wave1Duration = Date.now() - wave1Start;
+      console.log(`[Foreman:Preparation] Wave 1 completed in ${wave1Duration}ms`);
 
-      // Worker: File Discovery (i[9]: now passes task description for task-type awareness)
-      const fileResult = await this.fileWorker.discover(
+      // Process Wave 1 results
+      if (fileDiscoveryResult.success && fileDiscoveryResult.data) {
+        results.fileDiscovery = fileDiscoveryResult.data;
+        accumulateMetrics(fileDiscoveryResult.metrics);
+        metrics.workerCounts.succeeded++;
+        console.log(`[Foreman:Preparation] FileDiscovery: ${results.fileDiscovery.relevantFiles.length} files found`);
+      } else {
+        metrics.workerCounts.failed++;
+        console.warn(`[Foreman:Preparation] FileDiscovery failed: ${fileDiscoveryResult.error}`);
+      }
+
+      if (constraintResult.success && constraintResult.data) {
+        results.constraintIdentification = constraintResult.data;
+        accumulateMetrics(constraintResult.metrics);
+        metrics.workerCounts.succeeded++;
+        console.log(`[Foreman:Preparation] ConstraintIdentifier: found constraints`);
+      } else {
+        metrics.workerCounts.failed++;
+        console.warn(`[Foreman:Preparation] ConstraintIdentifier failed: ${constraintResult.error}`);
+      }
+
+      // =======================================================================
+      // Wave 2: Dependent workers (run in parallel, need Wave 1 results)
+      // =======================================================================
+      console.log('[Foreman:Preparation] Wave 2: PatternExtraction + DependencyMapper (parallel)');
+      const wave2Start = Date.now();
+
+      // Build context from Wave 1 results
+      const fileListContext = results.fileDiscovery
+        ? results.fileDiscovery.relevantFiles.map(f => `- ${f.path}: ${f.reason}`).join('\n')
+        : '';
+
+      const [patternResult, dependencyResult] = await Promise.all([
+        this.llmWorkers.patternExtraction.execute({
+          task: taskDescription,
+          projectRoot: projectPath,
+          additionalContext: {
+            fileList: fileListContext,
+          },
+        }),
+        this.llmWorkers.dependencyMapper.execute({
+          task: taskDescription,
+          projectRoot: projectPath,
+          additionalContext: {
+            fileList: fileListContext,
+          },
+        }),
+      ]);
+
+      const wave2Duration = Date.now() - wave2Start;
+      console.log(`[Foreman:Preparation] Wave 2 completed in ${wave2Duration}ms`);
+
+      // Process Wave 2 results
+      if (patternResult.success && patternResult.data) {
+        results.patternExtraction = patternResult.data;
+        accumulateMetrics(patternResult.metrics);
+        metrics.workerCounts.succeeded++;
+        console.log(`[Foreman:Preparation] PatternExtraction: ${results.patternExtraction.patterns.length} patterns found`);
+      } else {
+        metrics.workerCounts.failed++;
+        console.warn(`[Foreman:Preparation] PatternExtraction failed: ${patternResult.error}`);
+      }
+
+      if (dependencyResult.success && dependencyResult.data) {
+        results.dependencyMapping = dependencyResult.data;
+        accumulateMetrics(dependencyResult.metrics);
+        metrics.workerCounts.succeeded++;
+        console.log(`[Foreman:Preparation] DependencyMapper: ${results.dependencyMapping.dependencies.length} dependencies mapped`);
+      } else {
+        metrics.workerCounts.failed++;
+        console.warn(`[Foreman:Preparation] DependencyMapper failed: ${dependencyResult.error}`);
+      }
+
+      // =======================================================================
+      // Wave 3: Optional workers (based on task type)
+      // =======================================================================
+      const wave3Workers: Promise<void>[] = [];
+
+      if (options?.needsWebResearch) {
+        console.log('[Foreman:Preparation] Wave 3: WebResearch requested');
+        wave3Workers.push(
+          this.llmWorkers.webResearch.execute({
+            task: taskDescription,
+            projectRoot: projectPath,
+            additionalContext: {
+              researchQueries: taskDescription,
+            },
+          }).then(result => {
+            if (result.success && result.data) {
+              results.webResearch = result.data;
+              accumulateMetrics(result.metrics);
+              metrics.workerCounts.succeeded++;
+              console.log(`[Foreman:Preparation] WebResearch: ${results.webResearch.findings.length} findings`);
+            } else {
+              metrics.workerCounts.failed++;
+              console.warn(`[Foreman:Preparation] WebResearch failed: ${result.error}`);
+            }
+          })
+        );
+      }
+
+      if (options?.documentation) {
+        console.log('[Foreman:Preparation] Wave 3: DocumentationReader requested');
+        wave3Workers.push(
+          this.llmWorkers.documentationReader.execute({
+            task: taskDescription,
+            projectRoot: projectPath,
+            additionalContext: {
+              documentation: options.documentation,
+            },
+          }).then(result => {
+            if (result.success && result.data) {
+              results.documentationReading = result.data;
+              accumulateMetrics(result.metrics);
+              metrics.workerCounts.succeeded++;
+              console.log(`[Foreman:Preparation] DocumentationReader: ${results.documentationReading.relevantSections.length} sections`);
+            } else {
+              metrics.workerCounts.failed++;
+              console.warn(`[Foreman:Preparation] DocumentationReader failed: ${result.error}`);
+            }
+          })
+        );
+      }
+
+      if (wave3Workers.length > 0) {
+        const wave3Start = Date.now();
+        await Promise.all(wave3Workers);
+        const wave3Duration = Date.now() - wave3Start;
+        console.log(`[Foreman:Preparation] Wave 3 completed in ${wave3Duration}ms`);
+      }
+
+      // Store results for later use by synthesis
+      this.workerResults = results;
+
+      // Check if we have minimum viable results
+      if (!results.fileDiscovery) {
+        return {
+          success: false,
+          error: 'FileDiscovery is required but failed',
+          results,
+        };
+      }
+
+      console.log(`[Foreman:Preparation] Wave dispatch complete: ${metrics.workerCounts.succeeded} succeeded, ${metrics.workerCounts.failed} failed`);
+      console.log(`[Foreman:Preparation] Total cost: $${metrics.totalCostUsd.toFixed(4)}, Tokens: ${metrics.totalInputTokens} in / ${metrics.totalOutputTokens} out`);
+
+      return { success: true, results };
+
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error in wave dispatch';
+      console.error(`[Foreman:Preparation] Wave dispatch error: ${message}`);
+      return { success: false, error: message };
+    }
+  }
+
+  // ============================================================================
+  // Phase 4: Foreman Synthesis (Sonnet tier)
+  // ============================================================================
+
+  /**
+   * System prompt for Foreman synthesis.
+   * This prompt instructs the Sonnet-tier LLM to synthesize worker results
+   * into a complete ContextPackage.
+   */
+  private static readonly FOREMAN_SYNTHESIS_PROMPT = `You are the Preparation Foreman in The Forge, an AI-powered software factory.
+
+Your job is to synthesize the results from multiple specialized workers into a complete ContextPackage for task execution.
+
+## Input Format
+
+You will receive JSON containing results from these workers:
+- fileDiscovery: Relevant files and suggested new files
+- patternExtraction: Coding patterns and conventions
+- dependencyMapping: File dependencies and entry points
+- constraintIdentification: Technical constraints (TypeScript, tests, lint, build)
+- webResearch: (optional) External research findings
+- documentationReading: (optional) Documentation analysis
+
+## Output Requirements
+
+Produce a valid ContextPackage JSON object with this structure:
+
+{
+  "task": {
+    "description": "The task description",
+    "acceptanceCriteria": ["Criterion 1", "Criterion 2"],
+    "scope": {
+      "inScope": ["item 1", "item 2"],
+      "outOfScope": ["item 1"]
+    }
+  },
+  "architecture": {
+    "overview": "High-level architecture summary",
+    "relevantComponents": [
+      {"name": "ComponentName", "purpose": "What it does", "location": "path/to/file"}
+    ],
+    "dataFlow": "Optional data flow description",
+    "dependencies": ["dep1", "dep2"]
+  },
+  "codeContext": {
+    "mustRead": [
+      {"path": "path/to/file", "reason": "Why it's important"}
+    ],
+    "mustNotModify": [
+      {"path": "path/to/protected/file", "reason": "Why it should not be modified"}
+    ],
+    "relatedExamples": [
+      {"path": "path/to/file", "similarity": "How it's similar"}
+    ]
+  },
+  "patterns": {
+    "namingConventions": "Description of naming patterns",
+    "fileOrganization": "How files are organized",
+    "testingApproach": "Testing patterns used",
+    "errorHandling": "Error handling approach",
+    "codeStyle": ["style1", "style2"]
+  },
+  "constraints": {
+    "technical": ["constraint 1"],
+    "quality": ["quality req 1"],
+    "timeline": null
+  },
+  "risks": [
+    {"description": "Risk description", "mitigation": "How to mitigate"}
+  ],
+  "history": {
+    "previousAttempts": [],
+    "relatedDecisions": []
+  },
+  "humanSync": {
+    "requiredBefore": [],
+    "ambiguities": ["Any unclear requirements"]
+  }
+}
+
+## Synthesis Guidelines
+
+1. **File Discovery**: Use must_read files in codeContext.mustRead, should_read/may_read in relatedExamples
+2. **Patterns**: Synthesize pattern worker output into the patterns section
+3. **Constraints**: Combine constraint worker output into constraints.technical and constraints.quality
+4. **Dependencies**: Extract key dependencies for architecture.dependencies
+5. **Risks**: Identify risks based on constraint violations, complex dependencies, etc.
+6. **Acceptance Criteria**: Infer from task type and constraints
+
+Be concise but complete. Focus on what the executing instance needs to know.`;
+
+  /**
+   * Synthesize worker results into a ContextPackage using Sonnet tier.
+   *
+   * This is the Foreman's core function: taking the raw output from
+   * all workers and assembling them into a coherent, validated
+   * ContextPackage ready for execution.
+   *
+   * @param workerResults - Results from all workers (wave 1-3)
+   * @param taskDescription - The original task description
+   * @param projectPath - Project root path
+   * @param historicalContext - Historical context from learning retrieval
+   * @returns Validated ContextPackage or error
+   */
+  async synthesizeContextPackage(
+    workerResults: WorkerResultsType,
+    taskDescription: string,
+    projectPath: string,
+    historicalContext?: HistoricalContext
+  ): Promise<{
+    success: boolean;
+    package?: ContextPackage;
+    error?: string;
+    metrics?: {
+      inputTokens: number;
+      outputTokens: number;
+      costUsd: number;
+      latencyMs: number;
+    };
+  }> {
+    console.log('[Foreman:Synthesis] Starting context package synthesis (Sonnet tier)');
+
+    try {
+      // Build user prompt with all worker results
+      const userPrompt = JSON.stringify({
+        taskDescription,
         projectPath,
-        keywords,
-        task.classification.projectType,
-        task.rawRequest  // i[9]: Added for task-type-aware file discovery
-      );
+        workerResults: {
+          fileDiscovery: workerResults.fileDiscovery,
+          patternExtraction: workerResults.patternExtraction,
+          dependencyMapping: workerResults.dependencyMapping,
+          constraintIdentification: workerResults.constraintIdentification,
+          webResearch: workerResults.webResearch,
+          documentationReading: workerResults.documentationReading,
+        },
+        historicalContext: historicalContext ? {
+          previousAttempts: historicalContext.previousAttempts,
+          relatedDecisions: historicalContext.relatedDecisions,
+        } : undefined,
+      }, null, 2);
 
-      // Phase 3: Code Context Assembly
-      console.log('[Foreman:Preparation] Phase 3: Code Context Assembly');
+      // Call Sonnet tier for synthesis
+      const result = await this.tierRouter.call({
+        operation: 'context_package_assembly',
+        systemPrompt: PreparationForeman.FOREMAN_SYNTHESIS_PROMPT,
+        userPrompt,
+        maxTokens: 4096,
+        temperature: 0,
+      });
 
-      // Worker: Architecture Analysis
-      const relevantPaths = fileResult.relevantFiles.map(f => f.path);
-      const archResult = await this.architectureWorker.analyze(projectPath, relevantPaths);
+      console.log(`[Foreman:Synthesis] Sonnet response received: ${result.outputTokens} tokens, $${result.costUsd.toFixed(4)}`);
 
-      // Phase 4: Pattern & Constraint Synthesis
-      console.log('[Foreman:Preparation] Phase 4: Pattern Synthesis');
+      // Parse the JSON response
+      let parsedResponse: unknown;
+      try {
+        // Extract JSON from the response (may be wrapped in markdown code blocks)
+        let jsonContent = result.content.trim();
+        if (jsonContent.startsWith('```json')) {
+          jsonContent = jsonContent.slice(7);
+        } else if (jsonContent.startsWith('```')) {
+          jsonContent = jsonContent.slice(3);
+        }
+        if (jsonContent.endsWith('```')) {
+          jsonContent = jsonContent.slice(0, -3);
+        }
+        parsedResponse = JSON.parse(jsonContent.trim());
+      } catch (parseError) {
+        console.error('[Foreman:Synthesis] Failed to parse JSON response');
+        return {
+          success: false,
+          error: `Failed to parse synthesis response as JSON: ${parseError instanceof Error ? parseError.message : 'Unknown parse error'}`,
+          metrics: {
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            costUsd: result.costUsd,
+            latencyMs: result.latencyMs,
+          },
+        };
+      }
 
-      // Worker: Pattern Extraction
-      const patternResult = await this.patternWorker.extract(projectPath);
-
-      // Phase 5: Risk Assessment
-      console.log('[Foreman:Preparation] Phase 5: Risk Assessment');
-      const risks = this.assessRisks(task, fileResult, archResult);
-
-      // Phase 5.5: Learning Retrieval (added by i[4])
-      // This is the key to compound learning - retrieve historical context
-      console.log('[Foreman:Preparation] Phase 5.5: Learning Retrieval (i[4])');
-      const historicalContext = await this.learningRetriever.retrieve(
-        task.rawRequest,
-        projectPath
-      );
-
-      // Phase 6: Package Validation (internal)
-      console.log('[Foreman:Preparation] Phase 6: Package Validation');
-
-      // Phase 6.5: Task-Type-Aware Content Generation (i[10])
-      // This fixes the problem where ContextPackages had code-centric content
-      // even for non-code tasks like README creation.
-      console.log('[Foreman:Preparation] Phase 6.5: Task-Type Content Generation (i[10])');
-      const taskTypeContent = this.contentGenerator.generate(task.rawRequest);
-      console.log(`[Foreman:Preparation] Detected task type: ${taskTypeContent.taskType}`);
-
-      // Phase 7: Build the ContextPackage
-      console.log('[Foreman:Preparation] Phase 7: Building ContextPackage');
-
-      const contextPackage: ContextPackage = {
+      // Add required fields that Foreman doesn't generate
+      const packageWithMetadata = {
         id: crypto.randomUUID(),
-        projectType: task.classification.projectType,
+        projectType: 'feature' as const, // Default, can be overridden
         created: new Date(),
         preparedBy: this.instanceId,
+        ...parsedResponse as object,
+      };
 
-        task: {
-          description: task.rawRequest,
-          // i[10]: Use task-type-aware acceptance criteria instead of code-centric defaults
-          acceptanceCriteria: taskTypeContent.acceptanceCriteria,
-          scope: {
-            inScope: keywords,
-            outOfScope: ['unrelated features', 'major refactoring'],
+      // Validate with ContextPackage Zod schema (imported from types.ts)
+      // Note: ContextPackage is both a type and a Zod schema
+      const { ContextPackage: ContextPackageSchema } = await import('../types.js');
+      const validated = ContextPackageSchema.safeParse(packageWithMetadata);
+
+      if (!validated.success) {
+        console.error('[Foreman:Synthesis] Validation failed:', validated.error.errors);
+        return {
+          success: false,
+          error: `ContextPackage validation failed: ${validated.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`,
+          metrics: {
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            costUsd: result.costUsd,
+            latencyMs: result.latencyMs,
           },
-        },
+        };
+      }
 
-        architecture: {
-          overview: archResult.overview,
-          relevantComponents: archResult.components,
-          dataFlow: archResult.dataFlow,
-          dependencies: archResult.dependencies,
-        },
+      console.log('[Foreman:Synthesis] ContextPackage validated successfully');
 
-        codeContext: {
-          // Combine file discovery with historical learning (i[4])
-          mustRead: [
-            // Files from keyword search
-            ...fileResult.relevantFiles
-              .filter(f => f.priority === 'high')
-              .map(f => ({
-                path: f.path,
-                reason: f.reason,
-              })),
-            // Files from previous similar tasks (learning retrieval)
-            ...historicalContext.previousAttempts
-              .flatMap(attempt => attempt.keyFiles.map(path => ({
-                path,
-                reason: `From previous task: "${attempt.taskDescription.substring(0, 30)}..."`,
-              })))
-              .slice(0, 3), // Limit historical files
-          ].filter((f, i, arr) =>
-            // Deduplicate by path
-            arr.findIndex(x => x.path === f.path) === i
-          ),
-          mustNotModify: [], // Would be populated by deeper analysis
-          relatedExamples: [
-            // Files from keyword search
-            ...fileResult.relevantFiles
-              .filter(f => f.priority !== 'high')
-              .slice(0, 5)
-              .map(f => ({
-                path: f.path,
-                similarity: f.reason,
-              })),
-            // Files from co-modification patterns (learning retrieval)
-            ...historicalContext.coModificationPatterns
-              .flatMap(p => p.files.map(path => ({
-                path,
-                similarity: `Co-modified in: ${p.typicalTask}`,
-              })))
-              .slice(0, 3),
-          ].filter((f, i, arr) =>
-            arr.findIndex(x => x.path === f.path) === i
-          ),
-        },
-
-        // i[10]: Merge discovered patterns with task-type-aware patterns
-        patterns: {
-          namingConventions: taskTypeContent.patterns.conventions,
-          fileOrganization: taskTypeContent.patterns.organization,
-          testingApproach: patternResult.testingApproach, // Keep project-specific discovery
-          errorHandling: patternResult.errorHandling,     // Keep project-specific discovery
-          codeStyle: patternResult.codeStyle,             // Keep project-specific discovery
-        },
-
-        // i[10]: Use task-type-aware constraints instead of hardcoded code constraints
-        constraints: {
-          technical: archResult.dependencies.length > 10
-            ? ['Large dependency graph - minimize new dependencies']
-            : [],
-          quality: taskTypeContent.qualityConstraints,
-          timeline: null,
-        },
-
-        risks,
-
-        // History section now populated by LearningRetriever (i[4])
-        history: {
-          previousAttempts: historicalContext.previousAttempts.map(attempt => ({
-            what: attempt.taskDescription,
-            result: attempt.outcome,
-            lesson: attempt.lesson,
-          })),
-          relatedDecisions: historicalContext.relatedDecisions.map(decision => ({
-            decision: decision.title,
-            rationale: decision.rationale,
-          })),
-        },
-
-        humanSync: {
-          requiredBefore: risks.length > 2 ? ['execution'] : [],
-          ambiguities: this.findAmbiguities(task.rawRequest),
+      return {
+        success: true,
+        package: validated.data,
+        metrics: {
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          costUsd: result.costUsd,
+          latencyMs: result.latencyMs,
         },
       };
 
-      // Validate package
-      const validation = this.validatePackage(contextPackage);
-      if (!validation.valid) {
-        return { success: false, error: `Package validation failed: ${validation.errors.join(', ')}` };
-      }
-
-      // Store package on task
-      taskManager.setContextPackage(taskId, contextPackage);
-      taskManager.transitionState(taskId, 'prepared', this.instanceId, 'ContextPackage ready');
-
-      // Store to Mandrel
-      await mandrel.storeContext(
-        `ContextPackage prepared for task ${taskId}:\n${JSON.stringify(contextPackage, null, 2)}`,
-        'completion',
-        ['context-package', task.classification.projectType, this.instanceId]
-      );
-
-      console.log('[Foreman:Preparation] ContextPackage complete');
-      return { success: true, package: contextPackage };
-
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[Foreman:Preparation] Error: ${message}`);
-
-      taskManager.transitionState(taskId, 'failed', this.instanceId, message);
+      const message = error instanceof Error ? error.message : 'Unknown synthesis error';
+      console.error(`[Foreman:Synthesis] Error: ${message}`);
       return { success: false, error: message };
     }
   }
 
   /**
-   * Extract keywords from a request for file discovery
+   * Full LLM-based preparation pipeline.
+   *
+   * This is the Phase 4 replacement for the shell-command-based prepare() method.
+   * It runs wave-based workers followed by Foreman synthesis.
+   *
+   * @param taskDescription - The task to prepare for
+   * @param projectPath - Project root path
+   * @param options - Configuration options
    */
-  private extractKeywords(request: string): string[] {
-    // Remove common words
-    const stopWords = new Set([
-      'a', 'an', 'the', 'to', 'and', 'or', 'but', 'in', 'on', 'at', 'for',
-      'is', 'are', 'was', 'were', 'be', 'been', 'being',
-      'have', 'has', 'had', 'do', 'does', 'did',
-      'will', 'would', 'could', 'should', 'may', 'might', 'must',
-      'i', 'me', 'my', 'we', 'our', 'you', 'your', 'it', 'its',
-      'this', 'that', 'these', 'those',
-      'add', 'create', 'implement', 'fix', 'update', 'change', 'make',
-      'want', 'need', 'please', 'can', 'help',
-    ]);
-
-    const words = request
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 2 && !stopWords.has(w));
-
-    // Return unique keywords, max 10
-    return [...new Set(words)].slice(0, 10);
-  }
-
-  /**
-   * Infer acceptance criteria from request
-   */
-  private inferAcceptanceCriteria(request: string): string[] {
-    const criteria: string[] = [];
-
-    if (request.toLowerCase().includes('test')) {
-      criteria.push('Tests pass');
+  async prepareWithLLM(
+    taskDescription: string,
+    projectPath: string,
+    options?: {
+      needsWebResearch?: boolean;
+      documentation?: string;
+      historicalContext?: HistoricalContext;
     }
+  ): Promise<{
+    success: boolean;
+    package?: ContextPackage;
+    error?: string;
+    metrics?: {
+      workerMetrics: WorkerResultsType['metrics'];
+      synthesisMetrics?: {
+        inputTokens: number;
+        outputTokens: number;
+        costUsd: number;
+        latencyMs: number;
+      };
+      totalCostUsd: number;
+    };
+  }> {
+    console.log('[Foreman:Preparation] Starting LLM-based preparation pipeline');
 
-    if (request.toLowerCase().includes('error') || request.toLowerCase().includes('bug')) {
-      criteria.push('Error no longer occurs');
-    }
-
-    criteria.push('Code compiles without errors');
-    criteria.push('Functionality works as described');
-
-    return criteria;
-  }
-
-  /**
-   * Assess risks based on analysis results
-   */
-  private assessRisks(
-    task: ReturnType<typeof taskManager.getTask>,
-    fileResult: FileDiscoveryResult,
-    archResult: ArchitectureAnalysisResult
-  ): Array<{ description: string; mitigation: string }> {
-    const risks: Array<{ description: string; mitigation: string }> = [];
-
-    if (fileResult.relevantFiles.length === 0) {
-      risks.push({
-        description: 'No relevant files found - may be working in wrong location',
-        mitigation: 'Verify project path and keywords',
-      });
-    }
-
-    if (fileResult.relevantFiles.length > 20) {
-      risks.push({
-        description: 'Many files affected - scope may be too broad',
-        mitigation: 'Consider breaking into smaller tasks',
-      });
-    }
-
-    if (archResult.dependencies.length > 30) {
-      risks.push({
-        description: 'Complex dependency graph',
-        mitigation: 'Test thoroughly after changes',
-      });
-    }
-
-    return risks;
-  }
-
-  /**
-   * Find ambiguities that need human clarification
-   */
-  private findAmbiguities(request: string): string[] {
-    const ambiguities: string[] = [];
-
-    // Check for vague language
-    const vagueTerms = ['better', 'improve', 'optimize', 'clean', 'nice', 'good'];
-    for (const term of vagueTerms) {
-      if (request.toLowerCase().includes(term)) {
-        ambiguities.push(`"${term}" is subjective - needs specific criteria`);
+    // Step 1: Run wave-based workers
+    const waveResult = await this.executeWaveBasedWorkers(
+      taskDescription,
+      projectPath,
+      {
+        needsWebResearch: options?.needsWebResearch,
+        documentation: options?.documentation,
       }
+    );
+
+    if (!waveResult.success || !waveResult.results) {
+      return {
+        success: false,
+        error: waveResult.error || 'Wave-based worker dispatch failed',
+      };
     }
 
-    // Check for missing details
-    if (request.length < 50) {
-      ambiguities.push('Request is brief - may need more detail');
+    // Step 2: Synthesize into ContextPackage
+    const synthesisResult = await this.synthesizeContextPackage(
+      waveResult.results,
+      taskDescription,
+      projectPath,
+      options?.historicalContext
+    );
+
+    if (!synthesisResult.success || !synthesisResult.package) {
+      return {
+        success: false,
+        error: synthesisResult.error || 'Synthesis failed',
+        metrics: {
+          workerMetrics: waveResult.results.metrics,
+          synthesisMetrics: synthesisResult.metrics,
+          totalCostUsd: waveResult.results.metrics.totalCostUsd + (synthesisResult.metrics?.costUsd || 0),
+        },
+      };
     }
 
-    return ambiguities;
+    const totalCost = waveResult.results.metrics.totalCostUsd + (synthesisResult.metrics?.costUsd || 0);
+    console.log(`[Foreman:Preparation] LLM pipeline complete. Total cost: $${totalCost.toFixed(4)}`);
+
+    return {
+      success: true,
+      package: synthesisResult.package,
+      metrics: {
+        workerMetrics: waveResult.results.metrics,
+        synthesisMetrics: synthesisResult.metrics,
+        totalCostUsd: totalCost,
+      },
+    };
   }
 
-  /**
-   * Validate the ContextPackage
-   */
-  private validatePackage(pkg: ContextPackage): { valid: boolean; errors: string[] } {
-    const errors: string[] = [];
-
-    if (!pkg.task.description) {
-      errors.push('Missing task description');
-    }
-
-    if (pkg.codeContext.mustRead.length === 0 && pkg.codeContext.relatedExamples.length === 0) {
-      errors.push('No code context identified');
-    }
-
-    // Check estimated size (rough context window check)
-    const jsonSize = JSON.stringify(pkg).length;
-    if (jsonSize > 50000) {
-      errors.push(`Package too large (${jsonSize} chars) - may exceed context window`);
-    }
-
-    return { valid: errors.length === 0, errors };
-  }
+  // INTEGRATION-5: Removed shell-based prepare() method (see prepareWithLLM instead)
+  // Also removed helper methods: extractKeywords, inferAcceptanceCriteria, assessRisks, findAmbiguities, validatePackage
 }
 
 // Factory function
-export function createPreparationForeman(instanceId: string): PreparationForeman {
-  return new PreparationForeman(instanceId);
+export function createPreparationForeman(
+  instanceId: string,
+  tierRouter?: TierRouter
+): PreparationForeman {
+  return new PreparationForeman(instanceId, tierRouter);
 }

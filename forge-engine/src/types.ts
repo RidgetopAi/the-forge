@@ -118,13 +118,21 @@ export const ContextPackage = z.object({
       result: z.string(),
       lesson: z.string(),
     })),
-    // HARDENING-8: Accept both object format and string format, normalize to object
+    // HARDENING-8/9: Accept multiple formats from LLM, normalize to { decision, rationale }
+    // LLM may return: { decision, rationale }, { title, decision, rationale }, { title, rationale }, or plain string
     relatedDecisions: z.array(
       z.union([
+        // Format 1: Has 'decision' field - extract decision + rationale, ignore extras
         z.object({
           decision: z.string(),
           rationale: z.string().default('No rationale provided'),
-        }),
+        }).passthrough().transform((obj) => ({ decision: obj.decision, rationale: obj.rationale })),
+        // Format 2: Has 'title' but no 'decision' - use title as decision
+        z.object({
+          title: z.string(),
+          rationale: z.string().default('No rationale provided'),
+        }).transform((obj) => ({ decision: obj.title, rationale: obj.rationale })),
+        // Format 3: Plain string - convert to object
         z.string().transform((s) => ({ decision: s, rationale: 'No rationale provided' })),
       ])
     ),

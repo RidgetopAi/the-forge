@@ -14,12 +14,123 @@
 
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import {
   HumanSyncRequest,
   type ContextPackage,
   type ForgeTask,
 } from './types.js';
 import { mandrel } from './mandrel.js';
+
+// ============================================================================
+// Local Cache for Pending Requests (HARDENING-2)
+// ============================================================================
+
+/**
+ * Get the path to the local pending requests cache file.
+ * Uses ~/.forge/pending-requests.json for fast, exact lookups.
+ */
+function getPendingRequestsCachePath(): string {
+  const forgeDir = path.join(os.homedir(), '.forge');
+  return path.join(forgeDir, 'pending-requests.json');
+}
+
+/**
+ * Ensure the ~/.forge directory exists.
+ */
+function ensureForgeDir(): void {
+  const forgeDir = path.join(os.homedir(), '.forge');
+  if (!fs.existsSync(forgeDir)) {
+    fs.mkdirSync(forgeDir, { recursive: true });
+  }
+}
+
+/**
+ * Read all pending requests from local cache.
+ */
+function readPendingRequestsCache(): Record<string, {
+  request: HumanSyncRequest;
+  question: GeneratedQuestion;
+  storedAt: string;
+}> {
+  const cachePath = getPendingRequestsCachePath();
+  if (!fs.existsSync(cachePath)) {
+    return {};
+  }
+  try {
+    const content = fs.readFileSync(cachePath, 'utf-8');
+    const data = JSON.parse(content);
+    // Reconstruct Date objects
+    for (const key of Object.keys(data)) {
+      if (data[key].request?.created) {
+        data[key].request.created = new Date(data[key].request.created);
+      }
+    }
+    return data;
+  } catch {
+    console.warn('[HumanSync] Failed to read pending requests cache, starting fresh');
+    return {};
+  }
+}
+
+/**
+ * Write pending requests to local cache.
+ */
+function writePendingRequestsCache(cache: Record<string, {
+  request: HumanSyncRequest;
+  question: GeneratedQuestion;
+  storedAt: string;
+}>): void {
+  ensureForgeDir();
+  const cachePath = getPendingRequestsCachePath();
+  fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf-8');
+}
+
+/**
+ * Add a request to the local cache.
+ */
+function cacheRequest(request: HumanSyncRequest, question: GeneratedQuestion): void {
+  const cache = readPendingRequestsCache();
+  cache[request.id] = {
+    request,
+    question,
+    storedAt: new Date().toISOString(),
+  };
+  writePendingRequestsCache(cache);
+  console.log(`[HumanSync] Cached request ${request.id} locally`);
+}
+
+/**
+ * Get a request from the local cache by ID.
+ */
+function getCachedRequest(requestId: string): {
+  request: HumanSyncRequest;
+  question: GeneratedQuestion;
+} | null {
+  const cache = readPendingRequestsCache();
+  const entry = cache[requestId];
+  if (!entry) {
+    return null;
+  }
+  return {
+    request: entry.request,
+    question: entry.question,
+  };
+}
+
+/**
+ * Remove a request from the local cache (after it's been responded to).
+ */
+function removeCachedRequest(requestId: string): void {
+  const cache = readPendingRequestsCache();
+  if (cache[requestId]) {
+    delete cache[requestId];
+    writePendingRequestsCache(cache);
+    console.log(`[HumanSync] Removed request ${requestId} from local cache`);
+  }
+}
 
 // ============================================================================
 // Trigger Types
@@ -99,8 +210,50 @@ export const vagueTaskTrigger: HumanSyncTrigger = {
       };
     }
 
-    // Check for action verbs
-    const actionVerbs = ['add', 'create', 'build', 'implement', 'fix', 'update', 'remove', 'delete', 'refactor', 'change', 'modify'];
+    // Check for action verbs (HARDENING-1: expanded list)
+    const actionVerbs = [
+      // CRUD operations
+      'add', 'create', 'build', 'make', 'generate', 'write', 'insert',
+      'update', 'modify', 'change', 'edit', 'alter', 'adjust', 'set',
+      'remove', 'delete', 'drop', 'clear', 'clean', 'purge', 'erase',
+      'read', 'get', 'fetch', 'retrieve', 'load', 'find', 'search', 'query',
+
+      // Enhancement & improvement
+      'implement', 'enhance', 'improve', 'extend', 'expand', 'upgrade', 'boost',
+      'optimize', 'refactor', 'restructure', 'reorganize', 'simplify', 'streamline',
+      'fix', 'repair', 'patch', 'resolve', 'correct', 'address',
+
+      // Configuration & setup
+      'configure', 'setup', 'initialize', 'bootstrap', 'install', 'provision',
+      'enable', 'disable', 'activate', 'deactivate', 'toggle', 'switch',
+
+      // Movement & transformation
+      'move', 'copy', 'rename', 'convert', 'migrate', 'transform', 'translate',
+      'merge', 'split', 'combine', 'separate', 'extract', 'export', 'import',
+
+      // Integration & connection
+      'integrate', 'connect', 'link', 'attach', 'bind', 'wire', 'hook',
+      'sync', 'synchronize', 'align', 'coordinate',
+
+      // Testing & validation
+      'test', 'validate', 'verify', 'check', 'assert', 'ensure',
+      'debug', 'trace', 'profile', 'benchmark', 'measure', 'analyze',
+
+      // Documentation & annotation
+      'document', 'annotate', 'comment', 'describe', 'explain', 'clarify',
+
+      // Deployment & release
+      'deploy', 'publish', 'release', 'ship', 'launch', 'push', 'promote',
+
+      // Formatting & style
+      'format', 'lint', 'style', 'prettify', 'standardize', 'normalize',
+
+      // Reset & restore
+      'reset', 'restore', 'revert', 'rollback', 'undo', 'recover',
+
+      // Display & show
+      'display', 'show', 'render', 'print', 'output', 'present',
+    ];
     const hasActionVerb = actionVerbs.some(verb =>
       request.toLowerCase().includes(verb)
     );
@@ -928,6 +1081,10 @@ export async function saveRequestToMandrel(
     status: 'pending', // Will be updated when response received
   };
 
+  // HARDENING-2: Also cache locally for fast, exact lookup
+  cacheRequest(request, question);
+
+  // Store in Mandrel for history/learning (semantic search is unreliable for exact lookup)
   const result = await mandrel.storeContext(
     `HUMAN_SYNC_REQUEST_JSON:${JSON.stringify(payload)}`,
     'discussion',
@@ -938,7 +1095,10 @@ export async function saveRequestToMandrel(
 }
 
 /**
- * Load a HumanSyncRequest from Mandrel by its ID.
+ * Load a HumanSyncRequest by its ID.
+ *
+ * HARDENING-2: First checks local cache for fast, exact lookup.
+ * Falls back to Mandrel semantic search if not in cache (for backward compatibility).
  *
  * i[17]: This enables the --respond command to retrieve the original request
  * context, understand what was asked, and process the user's response.
@@ -949,18 +1109,26 @@ export async function loadRequestFromMandrel(requestId: string): Promise<{
   question?: GeneratedQuestion;
   error?: string;
 }> {
-  // i[17]: Search for the JSON-formatted request specifically
-  // Using the request ID in the query to find the right context
+  // HARDENING-2: First try local cache for fast, exact lookup
+  const cached = getCachedRequest(requestId);
+  if (cached) {
+    console.log(`[HumanSync] Found request ${requestId} in local cache`);
+    return { success: true, request: cached.request, question: cached.question };
+  }
+
+  console.log(`[HumanSync] Request ${requestId} not in local cache, falling back to Mandrel search`);
+
+  // Fallback: Search Mandrel (for requests created before HARDENING-2)
   const searchQuery = `HUMAN_SYNC_REQUEST_JSON request-${requestId}`;
-  const searchResults = await mandrel.searchContext(searchQuery, 10);
+  const searchResults = await mandrel.searchContext(searchQuery, 20); // Increased from 10
 
   if (!searchResults) {
-    return { success: false, error: 'Request not found in Mandrel' };
+    return { success: false, error: 'Request not found in local cache or Mandrel' };
   }
 
   // Extract context IDs from search results
   const ids = mandrel.extractIdsFromSearchResults(searchResults);
-  console.log(`[HumanSync] Found ${ids.length} potential matches`);
+  console.log(`[HumanSync] Found ${ids.length} potential matches in Mandrel`);
 
   if (ids.length === 0) {
     return { success: false, error: 'No matching request found' };
@@ -1005,7 +1173,7 @@ export async function loadRequestFromMandrel(requestId: string): Promise<{
             triggeredBy: payload.question.triggeredBy,
           };
 
-          console.log(`[HumanSync] Successfully loaded request ${requestId}`);
+          console.log(`[HumanSync] Successfully loaded request ${requestId} from Mandrel`);
           return { success: true, request, question };
         } catch (parseError) {
           console.error('[HumanSync] Failed to parse stored request:', parseError);
@@ -1020,6 +1188,8 @@ export async function loadRequestFromMandrel(requestId: string): Promise<{
 /**
  * Mark a request as responded in Mandrel.
  *
+ * HARDENING-2: Also removes from local cache.
+ *
  * i[17]: After processing a response, we store the completion record
  * so the learning system can see what decisions were made.
  */
@@ -1030,6 +1200,10 @@ export async function markRequestResponded(
   action: 'proceed' | 'modify' | 'abort' | 'retry',
   additionalNotes?: string
 ): Promise<void> {
+  // HARDENING-2: Remove from local cache since it's been processed
+  removeCachedRequest(requestId);
+
+  // Store response record in Mandrel for learning
   await mandrel.storeContext(
     `Human Sync Response Processed:\n` +
     `Request ID: ${requestId}\n` +

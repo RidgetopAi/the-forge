@@ -23,6 +23,7 @@
 
 import { mandrel } from './mandrel.js';
 import type { StructuredFailure } from './types.js';
+import { webSocketStreamer } from './websocket-streamer.js';
 
 // ============================================================================
 // Types
@@ -141,6 +142,17 @@ export class ExecutionTracer {
     };
 
     this.trace.steps.push(step);
+    
+    // Stream trace step
+    webSocketStreamer.streamTraceStep(
+      this.trace.taskId,
+      step.name,
+      step.status,
+      step.durationMs,
+      step.details,
+      step.error
+    );
+    
     this.currentStepName = null;
     this.currentStepStart = null;
   }
@@ -156,7 +168,7 @@ export class ExecutionTracer {
     error?: string
   ): void {
     const now = Date.now();
-    this.trace.steps.push({
+    const step = {
       name,
       status,
       startedAt: now - durationMs,
@@ -164,7 +176,19 @@ export class ExecutionTracer {
       durationMs,
       details,
       error,
-    });
+    };
+    
+    this.trace.steps.push(step);
+    
+    // Stream trace step
+    webSocketStreamer.streamTraceStep(
+      this.trace.taskId,
+      step.name,
+      step.status,
+      step.durationMs,
+      step.details,
+      step.error
+    );
   }
 
   /**

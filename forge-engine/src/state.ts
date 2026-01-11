@@ -7,6 +7,7 @@
 
 import { ForgeTask, TaskState, ProjectType, ContextPackage } from './types.js';
 import { mandrel } from './mandrel.js';
+import { webSocketStreamer } from './websocket-streamer.js';
 
 // ============================================================================
 // Valid State Transitions
@@ -88,8 +89,18 @@ export class TaskManager {
     });
 
     // Update state
+    const previousState = task.state;
     task.state = newState;
     task.updated = new Date();
+
+    // Stream phase transition
+    webSocketStreamer.streamPhaseTransition(
+      taskId,
+      previousState,
+      newState,
+      actor,
+      reason
+    );
 
     return { success: true };
   }

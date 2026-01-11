@@ -16,6 +16,7 @@
 
 import { HistoricalContext } from './types.js';
 import { mandrel } from './mandrel.js';
+import { getPatternTracker, PatternScore } from './pattern-tracker.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
@@ -351,21 +352,46 @@ export class LearningRetriever {
    *
    * Updated by i[5]: Now uses smartSearch (project-scoped) instead of
    * searchContext (global) to prevent cross-project contamination.
+   *
+   * Phase 5 Enhancement: Now also retrieves tracked patterns from PatternTracker
+   * with real success rates calculated from execution feedback.
    */
   private async findPatternHistory(
     projectPath: string
   ): Promise<HistoricalContext['patternHistory']> {
     try {
-      // Search for pattern-related contexts
       const projectName = projectPath.split('/').pop() || 'unknown';
-      // i[5]: Use smartSearch instead of searchContext
-      const response = await mandrel.smartSearch(`pattern ${projectName}`);
-      if (!response) return [];
+      const patterns: HistoricalContext['patternHistory'] = [];
 
-      // Parse response to extract patterns
-      const patterns = this.parsePatterns(response);
-      console.log(`[LearningRetriever] Found ${patterns.length} pattern history items (via smart_search)`);
-      return patterns;
+      // Phase 5: Get recommended patterns from PatternTracker (with real success rates)
+      try {
+        const tracker = getPatternTracker();
+        const trackedPatterns = tracker.getRecommendedPatterns(projectName, 5);
+
+        for (const tracked of trackedPatterns) {
+          patterns.push({
+            pattern: tracked.name,
+            successRate: tracked.successRate,
+            lastUsed: new Date(tracked.lastUsed),
+            context: `Tracked pattern from ${tracked.successCount + tracked.failureCount} executions`,
+          });
+        }
+        console.log(`[LearningRetriever] Found ${trackedPatterns.length} tracked patterns from PatternTracker`);
+      } catch (trackerError) {
+        console.warn('[LearningRetriever] PatternTracker unavailable:', trackerError);
+      }
+
+      // Also search Mandrel for pattern-related contexts (legacy path)
+      const response = await mandrel.smartSearch(`pattern ${projectName}`);
+      if (response) {
+        const mandrelPatterns = this.parsePatterns(response);
+        // Append Mandrel patterns (may have duplicates, but provides additional context)
+        patterns.push(...mandrelPatterns);
+        console.log(`[LearningRetriever] Found ${mandrelPatterns.length} patterns from smart_search`);
+      }
+
+      console.log(`[LearningRetriever] Total ${patterns.length} pattern history items`);
+      return patterns.slice(0, 10); // Limit to 10 most relevant
     } catch (error) {
       console.warn('[LearningRetriever] Error finding pattern history:', error);
       return [];
@@ -615,10 +641,13 @@ export class FeedbackRecorder {
   }
 
   /**
-   * Record execution feedback to Mandrel.
+   * Record execution feedback to Mandrel and PatternTracker.
    *
    * Call this after executing a task to store the results
    * for future preparations to learn from.
+   *
+   * Phase 5 Enhancement: Now also records pattern success/failure
+   * to PatternTracker for adaptive learning.
    */
   async recordFeedback(params: {
     taskId: string;
@@ -630,6 +659,10 @@ export class FeedbackRecorder {
     testsPassed?: boolean;
     compilationPassed: boolean;
     learnings: string[];
+    /** Phase 5: Patterns used during this execution */
+    patternsUsed?: Array<{ id: string; name: string }>;
+    /** Phase 5: Task type for pattern context tracking */
+    taskType?: string;
   }): Promise<{ success: boolean; id?: string }> {
     // Calculate accuracy delta
     const predictedSet = new Set(params.predictedMustRead);
@@ -680,6 +713,25 @@ export class FeedbackRecorder {
 
     if (result.success) {
       console.log(`[FeedbackRecorder] Recorded feedback for task ${params.taskId}`);
+    }
+
+    // Phase 5: Record pattern success/failure to PatternTracker
+    if (params.patternsUsed && params.patternsUsed.length > 0) {
+      try {
+        const tracker = getPatternTracker();
+        const taskType = params.taskType || 'general';
+
+        for (const pattern of params.patternsUsed) {
+          if (params.success) {
+            await tracker.recordSuccess(pattern.id, pattern.name, taskType);
+          } else {
+            await tracker.recordFailure(pattern.id, pattern.name);
+          }
+        }
+        console.log(`[FeedbackRecorder] Updated ${params.patternsUsed.length} patterns in PatternTracker`);
+      } catch (trackerError) {
+        console.warn('[FeedbackRecorder] Failed to update PatternTracker:', trackerError);
+      }
     }
 
     return result;
