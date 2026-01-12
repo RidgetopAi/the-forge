@@ -504,9 +504,13 @@ export const ambiguousTargetTrigger: HumanSyncTrigger = {
       const commonWords = ['called', 'named', 'defined', 'that', 'which', 'the', 'a', 'an', 'to', 'for', 'with', 'from', 'is', 'are', 'was', 'were', 'will', 'would', 'should', 'can', 'could', 'like', 'new', 'add', 'create', 'simple', 'basic', 'helper', 'utility', 'working', 'exactly', 'before'];
       if (!commonWords.includes(mentionedName)) {
         // i[34]: For ADD/CREATE tasks, the target WON'T exist in codeContext - that's expected!
-        // i[38]: For REFACTOR tasks with explicit file paths, the FUNCTION name won't be in the PATH - that's expected!
-        // Only fire the "not found" warning for MODIFY/FIX tasks where target should exist
-        if (!isNewThingTask && !(isRefactorTask && hasExplicitFileInMustRead)) {
+        // i[38]: For tasks with explicit file paths that ARE in mustRead, we have the right file - don't check
+        // i[39]: Fixed false positive - hasExplicitFileInMustRead should bypass check for ALL task types,
+        //        not just refactor tasks. The check looks for function NAME in file PATH which will never match.
+        // Only fire the "not found" warning for tasks where:
+        //   - Not creating something new (ADD/CREATE)
+        //   - No explicit file path mentioned that's already in mustRead
+        if (!isNewThingTask && !hasExplicitFileInMustRead) {
           const foundInMustRead = pkg.codeContext.mustRead.some(f =>
             f.path.toLowerCase().includes(mentionedName)
           );
