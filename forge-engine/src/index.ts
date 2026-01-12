@@ -1042,6 +1042,88 @@ async function handleTraces(): Promise<void> {
   console.log('═'.repeat(60));
 }
 
+/**
+ * Handle --serve command to run WebSocket server indefinitely
+ *
+ * Starts the WebSocket server and keeps it running, waiting for tasks.
+ * Does not require project or task arguments.
+ */
+async function handleServe(): Promise<void> {
+  console.log('═'.repeat(60));
+  console.log('THE FORGE - SERVER MODE');
+  console.log('═'.repeat(60));
+  
+  // Check if WebSocket is configured
+  const port = process.env.FORGE_WEBSOCKET_PORT;
+  if (!port) {
+    console.error('[Serve] FORGE_WEBSOCKET_PORT environment variable is not set.');
+    console.error('[Serve] Please set FORGE_WEBSOCKET_PORT to enable WebSocket server.');
+    console.log('');
+    console.log('Example: export FORGE_WEBSOCKET_PORT=8080');
+    process.exit(1);
+  }
+
+  console.log(`[Serve] Starting WebSocket server on port ${port}`);
+  console.log('[Serve] Server will run indefinitely waiting for task connections');
+  
+  // Connect to Mandrel
+  const connected = await mandrel.ping();
+  if (!connected) {
+    console.warn('[Serve] Warning: Could not connect to Mandrel. Proceeding without persistence.');
+  } else {
+    console.log('[Serve] Connected to Mandrel');
+  }
+  
+  // WebSocket server is already started by the singleton instance
+  // We just need to wait for it to be ready and keep the process alive
+  const status = webSocketStreamer.getStatus();
+  
+  if (!status.enabled) {
+    console.error('[Serve] WebSocket server failed to start. Check port availability.');
+    process.exit(1);
+  }
+  
+  // Wait a moment for the server to fully start
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
+  const finalStatus = webSocketStreamer.getStatus();
+  if (!finalStatus.connected) {
+    console.error('[Serve] WebSocket server did not start successfully.');
+    process.exit(1);
+  }
+  
+  console.log(`[Serve] ✓ Server ready on port ${finalStatus.port}`);
+  console.log(`[Serve] Connected clients: ${finalStatus.connectedClients}`);
+  console.log('[Serve] Waiting for connections...');
+  console.log('');
+  console.log('Press Ctrl+C to stop the server');
+  
+  // Set up graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n[Serve] Received SIGINT, shutting down gracefully...');
+    webSocketStreamer.disconnect();
+    process.exit(0);
+  });
+  
+  process.on('SIGTERM', () => {
+    console.log('\n[Serve] Received SIGTERM, shutting down gracefully...');
+    webSocketStreamer.disconnect();
+    process.exit(0);
+  });
+  
+  // Keep the process alive by checking status periodically
+  setInterval(() => {
+    const currentStatus = webSocketStreamer.getStatus();
+    // Only log if client count changed
+    if (currentStatus.connectedClients !== finalStatus.connectedClients) {
+      console.log(`[Serve] Connected clients: ${currentStatus.connectedClients}`);
+    }
+  }, 10000); // Check every 10 seconds
+  
+  // Keep the process running indefinitely
+  await new Promise(() => {}); // Never resolves
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -1101,6 +1183,12 @@ async function main() {
     return;
   }
 
+  // Handle --serve command for WebSocket server mode
+  if (args.includes('--serve')) {
+    await handleServe();
+    return;
+  }
+
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
   const shouldExecute = executeIndex !== -1;
@@ -1110,6 +1198,7 @@ async function main() {
 
   if (args.length < 2) {
     console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
+    console.log('       npx tsx src/index.ts --serve');
     console.log('       npx tsx src/index.ts --status');
     console.log('       npx tsx src/index.ts --insights [project-path]');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
@@ -1120,6 +1209,7 @@ async function main() {
     console.log('');
     console.log('Commands:');
     console.log('  <project-path> "<request>"   Process a new task');
+    console.log('  --serve                      Start WebSocket server and wait for connections');
     console.log('  --status                     Show pending Human Sync requests');
     console.log('  --insights [path]            Analyze accumulated learning (i[21])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
@@ -1137,6 +1227,7 @@ async function main() {
     console.log('Examples:');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README"');
     console.log('  npx tsx src/index.ts /workspace/projects/the-forge "add a README" --execute');
+    console.log('  npx tsx src/index.ts --serve');
     console.log('  npx tsx src/index.ts --status');
     console.log('  npx tsx src/index.ts --insights');
     console.log('  npx tsx src/index.ts --insights /workspace/projects/the-forge');

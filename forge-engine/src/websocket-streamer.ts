@@ -121,7 +121,8 @@ export class WebSocketStreamer {
       // Handle new connections
       this.wss.on('connection', (ws: WebSocket, request) => {
         const clientId = crypto.randomUUID().slice(0, 8);
-        console.log(`[WebSocketStreamer] Client ${clientId} connected from ${request.socket.remoteAddress}`);
+        const clientAddr = request.socket.remoteAddress || 'unknown';
+        console.log(`[WebSocketStreamer] ✓ Client ${clientId} connected from ${clientAddr}`);
         
         this.connectedClients.add(ws);
         
@@ -130,7 +131,7 @@ export class WebSocketStreamer {
 
         // Handle client disconnect
         ws.on('close', (code, reason) => {
-          console.log(`[WebSocketStreamer] Client ${clientId} disconnected (code: ${code})`);
+          console.log(`[WebSocketStreamer] ✗ Client ${clientId} disconnected (code: ${code})`);
           this.connectedClients.delete(ws);
         });
 
