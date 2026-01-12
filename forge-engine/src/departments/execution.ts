@@ -167,7 +167,7 @@ const CODE_GENERATION_TOOL: Anthropic.Tool = {
             },
             edits: {
               type: 'array',
-              description: 'For edit action: array of search/replace operations to apply in order',
+              description: 'For edit action: array of search/replace operations. CRITICAL: Each search string must be COMPLETE - never use ellipsis (...) to abbreviate.',
               items: {
                 type: 'object',
                 properties: {
@@ -649,6 +649,12 @@ If the project uses ESM with NodeNext/Node16 module resolution (check constraint
 - Every task requires at least one file to be created or modified
 - If you're unsure, create the new file(s) anyway - we can iterate
 - An empty files array is a FAILURE - you must produce working code
+
+## FINAL REMINDER: SEARCH STRINGS (HARDENING-14)
+When using "edit" action, your search strings will be matched LITERALLY against the file.
+- Include the COMPLETE text, not a summary or abbreviation
+- Using "..." or truncating the string = GUARANTEED FAILURE
+- Copy the exact code from the file, including all whitespace
 
 Generate the code now by calling the submit_code_changes tool with actual file changes:`;
   }
