@@ -1189,6 +1189,55 @@ async function main() {
     return;
   }
 
+  // Handle --resume command to resume a paused task
+  const resumeIndex = args.indexOf('--resume');
+  if (resumeIndex !== -1) {
+    const taskId = args[resumeIndex + 1];
+
+    if (!taskId || taskId.startsWith('--')) {
+      console.log('Usage: npx tsx src/index.ts --resume <task-id> [--execute]');
+      console.log('');
+      console.log('Resume a task that was paused by Human Sync.');
+      console.log('Get task IDs from --status or from previous run output.');
+      process.exit(1);
+    }
+
+    console.log('════════════════════════════════════════════════════════════');
+    console.log('THE FORGE - Resume Task');
+    console.log('════════════════════════════════════════════════════════════');
+    console.log(`[Resume] Task ID: ${taskId}`);
+    console.log('');
+
+    // Search for the context package by task ID
+    console.log('[Resume] Searching for task context in Mandrel...');
+    const searchResult = await mandrel.searchContext(`task ${taskId}`);
+
+    if (searchResult && searchResult.length > 0) {
+      console.log('[Resume] Found related context. Displaying...');
+      console.log('');
+      console.log(searchResult.substring(0, 500) + (searchResult.length > 500 ? '...' : ''));
+    } else {
+      console.log('[Resume] No stored context found for this task.');
+    }
+
+    console.log('');
+    console.log('═'.repeat(60));
+    console.log('RESUME NOT YET FULLY IMPLEMENTED');
+    console.log('═'.repeat(60));
+    console.log('');
+    console.log('After responding to a Human Sync request, re-run the original task:');
+    console.log('');
+    console.log('  1. First respond to the request:');
+    console.log('     npx tsx src/index.ts --respond <request-id> <option-id>');
+    console.log('');
+    console.log('  2. Then re-run your task:');
+    console.log('     npx tsx src/index.ts <project-path> "<original-request>" --execute');
+    console.log('');
+    console.log('The Human Sync response will be used when re-processing.');
+
+    return;
+  }
+
   // Parse --execute flag
   const executeIndex = args.indexOf('--execute');
   const shouldExecute = executeIndex !== -1;
@@ -1200,6 +1249,7 @@ async function main() {
     console.log('Usage: npx tsx src/index.ts <project-path> "<request>" [--execute]');
     console.log('       npx tsx src/index.ts --serve');
     console.log('       npx tsx src/index.ts --status');
+    console.log('       npx tsx src/index.ts --resume <task-id> [--execute]');
     console.log('       npx tsx src/index.ts --insights [project-path]');
     console.log('       npx tsx src/index.ts --respond <request-id> <option-id> [--notes "..."]');
     console.log('       npx tsx src/index.ts --self-improve <project-path> [--dry-run] [--max-tasks N]');
@@ -1211,6 +1261,7 @@ async function main() {
     console.log('  <project-path> "<request>"   Process a new task');
     console.log('  --serve                      Start WebSocket server and wait for connections');
     console.log('  --status                     Show pending Human Sync requests');
+    console.log('  --resume <task-id>           Resume a task paused by Human Sync');
     console.log('  --insights [path]            Analyze accumulated learning (i[21])');
     console.log('  --respond <id> <option>      Respond to a Human Sync request');
     console.log('  --self-improve <path>        Run self-improvement cycle (i[28])');
