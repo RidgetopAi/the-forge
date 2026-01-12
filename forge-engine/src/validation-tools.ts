@@ -227,10 +227,16 @@ export class ValidationToolBuilder {
           const duration = Date.now() - startTime;
 
           // Determine pass/fail based on exit code (we got here, so it's 0)
-          // and output content
-          const passed = !output.toLowerCase().includes('error') &&
-                        !output.toLowerCase().includes('failed') &&
-                        !output.toLowerCase().includes('✗');
+          // i[39]: Fixed false negative - only check for ERROR PATTERNS, not identifiers
+          // Previous: "handleError" in export would fail validation incorrectly
+          // Now: Only fail on actual error messages like "Error:" or "error:" at line start
+          const lowerOutput = output.toLowerCase();
+          const hasActualError = lowerOutput.includes('error:') ||     // Error messages typically have colon
+                                 lowerOutput.includes('exception:') ||  // Exception messages
+                                 /^error\s/m.test(lowerOutput) ||       // "error" at line start
+                                 /\bfailed\s+(?:to|with)/i.test(output) ||  // "failed to" or "failed with" patterns
+                                 lowerOutput.includes('✗');             // Explicit failure marker
+          const passed = !hasActualError;
 
           return {
             toolId: tool.id,
@@ -255,8 +261,15 @@ export class ValidationToolBuilder {
 
         const output = stdout + stderr;
         const duration = Date.now() - startTime;
-        const passed = !output.toLowerCase().includes('error') &&
-                      !output.toLowerCase().includes('failed');
+
+        // i[39]: Fixed false negative - only check for ERROR PATTERNS, not identifiers
+        const lowerOutput = output.toLowerCase();
+        const hasActualError = lowerOutput.includes('error:') ||
+                               lowerOutput.includes('exception:') ||
+                               /^error\s/m.test(lowerOutput) ||
+                               /\bfailed\s+(?:to|with)/i.test(output) ||
+                               lowerOutput.includes('✗');
+        const passed = !hasActualError;
 
         return {
           toolId: tool.id,
