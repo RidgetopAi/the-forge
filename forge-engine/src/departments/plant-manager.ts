@@ -18,6 +18,7 @@ import { ProjectType } from '../types.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
 import { llmClient, type ClassificationResult } from '../llm.js';
+import { webSocketStreamer } from '../websocket-streamer.js';
 
 // ============================================================================
 // Plant Manager Class
@@ -68,9 +69,32 @@ export class PlantManager {
     const task = taskManager.createTask(rawRequest);
     console.log(`[PlantManager] Created task: ${task.id}`);
 
+    // Stream intake phase entry
+    webSocketStreamer.streamPhaseTransition(
+      task.id,
+      null,
+      'intake',
+      this.instanceId,
+      'Task created and entering intake phase'
+    );
+
     // Classify (now async - uses LLM when available)
     const classification = await this.classify(rawRequest);
     console.log(`[PlantManager] Classification (${classification.method}):\n${classification.reasoning}`);
+
+    // Stream classification progress
+    webSocketStreamer.streamProgressUpdate(
+      task.id,
+      'intake',
+      'classification',
+      'completed',
+      {
+        method: classification.method,
+        projectType: classification.projectType,
+        scope: classification.scope,
+        confidence: classification.confidence
+      }
+    );
 
     // Set classification on task
     taskManager.setClassification(task.id, {

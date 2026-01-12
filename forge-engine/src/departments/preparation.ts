@@ -18,6 +18,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { webSocketStreamer } from '../websocket-streamer.js';
 
 // Phase 4: LLM-based workers (replacing shell-command workers)
 import { TierRouter } from '../tiers.js';
@@ -888,6 +889,7 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
       needsWebResearch?: boolean;
       documentation?: string;
       historicalContext?: HistoricalContext;
+      taskId?: string;
     }
   ): Promise<{
     success: boolean;
@@ -906,6 +908,25 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
   }> {
     console.log('[Foreman:Preparation] Starting LLM-based preparation pipeline');
 
+    // Stream preparation phase entry if we have a taskId
+    if (options?.taskId) {
+      webSocketStreamer.streamPhaseTransition(
+        options.taskId,
+        'classified',
+        'preparing',
+        this.instanceId,
+        'Entering LLM-based preparation pipeline'
+      );
+
+      webSocketStreamer.streamProgressUpdate(
+        options.taskId,
+        'preparation',
+        'wave_dispatch_starting',
+        'started',
+        { description: taskDescription }
+      );
+    }
+
     // Step 1: Run wave-based workers
     const waveResult = await this.executeWaveBasedWorkers(
       taskDescription,
@@ -916,7 +937,40 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
       }
     );
 
+    // Stream wave execution status
+    if (options?.taskId) {
+      if (waveResult.success) {
+        webSocketStreamer.streamProgressUpdate(
+          options.taskId,
+          'preparation',
+          'wave_dispatch_completed',
+          'completed',
+          {
+            workerSucceeded: waveResult.results?.metrics.workerCounts.succeeded,
+            workerFailed: waveResult.results?.metrics.workerCounts.failed,
+            totalCost: waveResult.results?.metrics.totalCostUsd
+          }
+        );
+      } else {
+        webSocketStreamer.streamProgressUpdate(
+          options.taskId,
+          'preparation',
+          'wave_dispatch_failed',
+          'failed',
+          undefined,
+          waveResult.error
+        );
+      }
+    }
+
     if (!waveResult.success || !waveResult.results) {
+      if (options?.taskId) {
+        webSocketStreamer.streamError(
+          options.taskId,
+          waveResult.error || 'Wave-based worker dispatch failed',
+          'preparation'
+        );
+      }
       return {
         success: false,
         error: waveResult.error || 'Wave-based worker dispatch failed',
@@ -924,6 +978,16 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
     }
 
     // Step 2: Synthesize into ContextPackage
+    if (options?.taskId) {
+      webSocketStreamer.streamProgressUpdate(
+        options.taskId,
+        'preparation',
+        'synthesis_starting',
+        'started',
+        { foreman: 'Sonnet-tier synthesis' }
+      );
+    }
+
     const synthesisResult = await this.synthesizeContextPackage(
       waveResult.results,
       taskDescription,
@@ -932,6 +996,16 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
     );
 
     if (!synthesisResult.success || !synthesisResult.package) {
+      if (options?.taskId) {
+        webSocketStreamer.streamProgressUpdate(
+          options.taskId,
+          'preparation',
+          'synthesis_failed',
+          'failed',
+          undefined,
+          synthesisResult.error
+        );
+      }
       return {
         success: false,
         error: synthesisResult.error || 'Synthesis failed',
@@ -945,6 +1019,21 @@ Be concise but complete. Focus on what the executing instance needs to know.`;
 
     const totalCost = waveResult.results.metrics.totalCostUsd + (synthesisResult.metrics?.costUsd || 0);
     console.log(`[Foreman:Preparation] LLM pipeline complete. Total cost: $${totalCost.toFixed(4)}`);
+
+    // Stream successful preparation completion
+    if (options?.taskId) {
+      webSocketStreamer.streamProgressUpdate(
+        options.taskId,
+        'preparation',
+        'synthesis_completed',
+        'completed',
+        {
+          contextPackageId: synthesisResult.package.id,
+          totalCost: totalCost,
+          mustReadFiles: synthesisResult.package.codeContext.mustRead.length
+        }
+      );
+    }
 
     return {
       success: true,

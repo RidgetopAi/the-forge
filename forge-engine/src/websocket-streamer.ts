@@ -12,7 +12,8 @@
  * - JSON event format for easy consumption
  */
 
-import { WebSocket } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
+import * as http from 'node:http';
 import type { TaskState, ForgeTask } from './types.js';
 import type { ExecutionTrace, TraceStep } from './tracing.js';
 import type { QualityEvaluation } from './llm.js';
@@ -82,97 +83,130 @@ export interface CompletionEvent extends WebSocketEvent {
 // ============================================================================
 
 export class WebSocketStreamer {
-  private websocketUrl?: string;
-  private ws?: WebSocket;
-  private isConnected: boolean = false;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 3;
-  private reconnectDelay: number = 1000;
+  private port?: number;
+  private server?: http.Server;
+  private wss?: WebSocketServer;
+  private isListening: boolean = false;
+  private connectedClients: Set<WebSocket> = new Set();
   private eventQueue: WebSocketEvent[] = [];
   private maxQueueSize: number = 100;
 
   constructor() {
-    this.websocketUrl = process.env.FORGE_WEBSOCKET_URL;
+    const portEnv = process.env.FORGE_WEBSOCKET_PORT;
+    this.port = portEnv ? parseInt(portEnv, 10) : undefined;
     
-    if (this.websocketUrl) {
-      console.log(`[WebSocketStreamer] Configured for streaming to: ${this.websocketUrl}`);
-      this.connect();
+    if (this.port) {
+      console.log(`[WebSocketStreamer] Starting WebSocket server on port ${this.port}`);
+      this.startServer();
     } else {
-      console.log('[WebSocketStreamer] No FORGE_WEBSOCKET_URL configured - streaming disabled');
+      console.log('[WebSocketStreamer] No FORGE_WEBSOCKET_PORT configured - streaming disabled');
     }
   }
 
   /**
-   * Connect to WebSocket server
+   * Start WebSocket server
    */
-  private async connect(): Promise<void> {
-    if (!this.websocketUrl || this.isConnected) {
+  private async startServer(): Promise<void> {
+    if (!this.port || this.isListening) {
       return;
     }
 
     try {
-      this.ws = new WebSocket(this.websocketUrl);
+      // Create HTTP server
+      this.server = http.createServer();
+      
+      // Create WebSocket server
+      this.wss = new WebSocketServer({ server: this.server });
 
-      this.ws.on('open', () => {
-        console.log('[WebSocketStreamer] Connected successfully');
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        this.flushEventQueue();
+      // Handle new connections
+      this.wss.on('connection', (ws: WebSocket, request) => {
+        const clientId = crypto.randomUUID().slice(0, 8);
+        console.log(`[WebSocketStreamer] Client ${clientId} connected from ${request.socket.remoteAddress}`);
+        
+        this.connectedClients.add(ws);
+        
+        // Send queued events to new client
+        this.sendQueuedEventsToClient(ws);
+
+        // Handle client disconnect
+        ws.on('close', (code, reason) => {
+          console.log(`[WebSocketStreamer] Client ${clientId} disconnected (code: ${code})`);
+          this.connectedClients.delete(ws);
+        });
+
+        ws.on('error', (error) => {
+          console.warn(`[WebSocketStreamer] Client ${clientId} error: ${error.message}`);
+          this.connectedClients.delete(ws);
+        });
+
+        // Optional: Handle messages from clients (for future bidirectional communication)
+        ws.on('message', (data) => {
+          try {
+            const message = JSON.parse(data.toString());
+            console.log(`[WebSocketStreamer] Message from client ${clientId}:`, message);
+          } catch {
+            // Ignore malformed messages
+          }
+        });
       });
 
-      this.ws.on('close', (code, reason) => {
-        console.log(`[WebSocketStreamer] Disconnected (code: ${code}, reason: ${reason})`);
-        this.isConnected = false;
-        this.scheduleReconnect();
-      });
-
-      this.ws.on('error', (error) => {
-        console.warn(`[WebSocketStreamer] Connection error: ${error.message}`);
-        this.isConnected = false;
+      // Start listening
+      await new Promise<void>((resolve, reject) => {
+        this.server!.listen(this.port, () => {
+          console.log(`[WebSocketStreamer] Server listening on port ${this.port}`);
+          this.isListening = true;
+          resolve();
+        });
+        
+        this.server!.on('error', (error) => {
+          console.warn(`[WebSocketStreamer] Server error: ${error.message}`);
+          reject(error);
+        });
       });
 
     } catch (error) {
-      console.warn(`[WebSocketStreamer] Failed to connect: ${error}`);
-      this.scheduleReconnect();
+      console.warn(`[WebSocketStreamer] Failed to start server: ${error}`);
     }
   }
 
   /**
-   * Schedule reconnection attempt
-   */
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.warn('[WebSocketStreamer] Max reconnection attempts reached - giving up');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * this.reconnectAttempts;
-    
-    console.log(`[WebSocketStreamer] Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
-    
-    setTimeout(() => {
-      this.connect();
-    }, delay);
-  }
-
-  /**
-   * Send event to WebSocket or queue for later
+   * Send event to all connected clients or queue for later
    */
   private sendEvent(event: WebSocketEvent): void {
-    if (!this.websocketUrl) {
+    if (!this.port) {
       return; // Streaming disabled
     }
 
-    if (this.isConnected && this.ws?.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify(event));
-      } catch (error) {
-        console.warn(`[WebSocketStreamer] Failed to send event: ${error}`);
-        this.queueEvent(event);
-      }
+    if (this.isListening && this.connectedClients.size > 0) {
+      this.broadcastToClients(event);
     } else {
       this.queueEvent(event);
+    }
+  }
+
+  /**
+   * Broadcast event to all connected clients
+   */
+  private broadcastToClients(event: WebSocketEvent): void {
+    const eventData = JSON.stringify(event);
+    const disconnectedClients: WebSocket[] = [];
+
+    for (const client of this.connectedClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(eventData);
+        } catch (error) {
+          console.warn(`[WebSocketStreamer] Failed to send to client: ${error}`);
+          disconnectedClients.push(client);
+        }
+      } else {
+        disconnectedClients.push(client);
+      }
+    }
+
+    // Clean up disconnected clients
+    for (const client of disconnectedClients) {
+      this.connectedClients.delete(client);
     }
   }
 
@@ -190,20 +224,40 @@ export class WebSocketStreamer {
   }
 
   /**
-   * Send all queued events
+   * Send all queued events to connected clients
    */
   private flushEventQueue(): void {
-    if (!this.isConnected || this.eventQueue.length === 0) {
+    if (!this.isListening || this.eventQueue.length === 0 || this.connectedClients.size === 0) {
       return;
     }
 
-    console.log(`[WebSocketStreamer] Flushing ${this.eventQueue.length} queued events`);
+    console.log(`[WebSocketStreamer] Flushing ${this.eventQueue.length} queued events to ${this.connectedClients.size} client(s)`);
     
     const events = [...this.eventQueue];
     this.eventQueue = [];
     
     for (const event of events) {
-      this.sendEvent(event);
+      this.broadcastToClients(event);
+    }
+  }
+
+  /**
+   * Send queued events to a specific new client
+   */
+  private sendQueuedEventsToClient(client: WebSocket): void {
+    if (this.eventQueue.length === 0 || client.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    console.log(`[WebSocketStreamer] Sending ${this.eventQueue.length} queued events to new client`);
+    
+    for (const event of this.eventQueue) {
+      try {
+        client.send(JSON.stringify(event));
+      } catch (error) {
+        console.warn(`[WebSocketStreamer] Failed to send queued event to new client: ${error}`);
+        break;
+      }
     }
   }
 
@@ -344,45 +398,66 @@ export class WebSocketStreamer {
   }
 
   /**
-   * Close the WebSocket connection
+   * Stop the WebSocket server and close all connections
    */
   disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.isConnected = false;
+    if (this.wss) {
+      console.log('[WebSocketStreamer] Closing WebSocket server...');
+      
+      // Close all client connections
+      for (const client of this.connectedClients) {
+        client.close();
+      }
+      this.connectedClients.clear();
+      
+      // Close the WebSocket server
+      this.wss.close();
     }
+    
+    if (this.server) {
+      this.server.close();
+    }
+    
+    this.isListening = false;
   }
 
   /**
    * Check if streaming is enabled
    */
   isEnabled(): boolean {
-    return !!this.websocketUrl;
+    return !!this.port;
   }
 
   /**
-   * Check if currently connected
+   * Check if server is currently listening
    */
   isStreamingConnected(): boolean {
-    return this.isConnected;
+    return this.isListening;
   }
 
   /**
-   * Get connection status
+   * Get number of connected clients
+   */
+  getConnectedClientCount(): number {
+    return this.connectedClients.size;
+  }
+
+  /**
+   * Get server status
    */
   getStatus(): {
     enabled: boolean;
     connected: boolean;
-    url?: string;
+    port?: number;
+    connectedClients: number;
     queuedEvents: number;
-    reconnectAttempts: number;
   } {
     return {
-      enabled: !!this.websocketUrl,
-      connected: this.isConnected,
-      url: this.websocketUrl,
+      enabled: !!this.port,
+      connected: this.isListening,
+      port: this.port,
+      connectedClients: this.connectedClients.size,
       queuedEvents: this.eventQueue.length,
-      reconnectAttempts: this.reconnectAttempts,
     };
   }
 }

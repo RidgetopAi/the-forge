@@ -53,6 +53,7 @@ import { TierRouter, calculateCost } from '../tiers.js';
 import { getPatternTracker } from '../pattern-tracker.js';
 import { taskManager } from '../state.js';
 import { mandrel } from '../mandrel.js';
+import { webSocketStreamer } from '../websocket-streamer.js';
 import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
 import {
   createValidationToolBuilder,
@@ -172,7 +173,7 @@ const CODE_GENERATION_TOOL: Anthropic.Tool = {
                 properties: {
                   search: {
                     type: 'string',
-                    description: 'Exact text to find in the file (must match exactly, including whitespace)',
+                    description: 'COMPLETE, VERBATIM text to find in the file. Must match exactly including whitespace. NEVER truncate with ellipsis (...) - the full text must be included.',
                   },
                   replace: {
                     type: 'string',
@@ -594,7 +595,16 @@ For the edit action, provide an array of search/replace operations:
   ]
 }
 \`\`\`
-The search string must match EXACTLY what's in the file (including whitespace).
+
+### CRITICAL: SEARCH STRING REQUIREMENTS (HARDENING-14)
+- The search string must be the COMPLETE, VERBATIM text from the file
+- NEVER truncate with ellipsis (...) - this will FAIL
+- NEVER abbreviate or summarize code - include the FULL text
+- Include enough context (2-3 lines) to make the match UNIQUE in the file
+- Copy the exact whitespace, indentation, and line breaks
+- If a search string is too long, that's OK - include it all anyway
+- The FileOperationWorker does LITERAL string matching - there is no fuzzy matching
+
 Each edit is applied in order.
 
 ## OTHER REQUIREMENTS
@@ -1093,7 +1103,13 @@ ${modifiedFiles.map(f => `- ${f}`).join('\n')}
 3. Do NOT add new features or functionality
 4. Do NOT modify files not listed above
 5. Use the "edit" action with precise search/replace pairs
-6. The search string must match EXACTLY what's in the file
+
+## SEARCH STRING REQUIREMENTS (HARDENING-14)
+- The search string must be COMPLETE, VERBATIM text from the file
+- NEVER truncate with ellipsis (...) - this will FAIL
+- NEVER abbreviate - include the FULL text
+- Include enough context (2-3 lines) to make the match UNIQUE
+- Copy exact whitespace and indentation
 
 ## TASK CONTEXT (for reference only)
 Original task: ${pkg.task.description}
@@ -1436,15 +1452,38 @@ export class ExecutionForeman {
     console.log(`[Foreman:Execution] Starting execution for task ${taskId}`);
     console.log(`[Foreman:Execution] Task: ${pkg.task.description.substring(0, 100)}...`);
 
+    // Stream progress update for execution start
+    webSocketStreamer.streamProgressUpdate(
+      taskId,
+      'execution',
+      'start',
+      'started',
+      { taskDescription: pkg.task.description.substring(0, 100) + '...' }
+    );
+
     // Transition to executing state
     taskManager.transitionState(taskId, 'executing', this.instanceId, 'Starting execution');
 
     try {
       // Phase 1: Code Generation
       console.log('\n[Foreman:Execution] Phase 1: Code Generation');
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'code_generation',
+        'started'
+      );
       const codeResult = await this.codeWorker.generate(pkg, projectPath);
 
       if (!codeResult.success) {
+        webSocketStreamer.streamProgressUpdate(
+          taskId,
+          'execution',
+          'code_generation',
+          'failed',
+          undefined,
+          codeResult.error
+        );
         taskManager.transitionState(taskId, 'failed', this.instanceId, codeResult.error || 'Code generation failed');
         return {
           success: false,
@@ -1462,6 +1501,16 @@ export class ExecutionForeman {
 
       console.log(`[Foreman:Execution] Generated ${codeResult.files.length} file(s)`);
       console.log(`[Foreman:Execution] Explanation: ${codeResult.explanation}`);
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'code_generation',
+        'completed',
+        {
+          filesGenerated: codeResult.files.length,
+          explanation: codeResult.explanation
+        }
+      );
 
       // INTEGRATION-4: Track costs
       let codeGenCost = codeResult.costUsd ?? 0;
@@ -1469,15 +1518,47 @@ export class ExecutionForeman {
 
       // Phase 2: File Operations
       console.log('\n[Foreman:Execution] Phase 2: File Operations');
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'file_operations',
+        'started'
+      );
       const fileResult = await this.fileWorker.apply(codeResult.files);
 
       if (fileResult.errors.length > 0) {
         const errorMsg = fileResult.errors.map(e => `${e.path}: ${e.error}`).join('; ');
         console.warn(`[Foreman:Execution] File operation errors: ${errorMsg}`);
+        webSocketStreamer.streamProgressUpdate(
+          taskId,
+          'execution',
+          'file_operations',
+          'failed',
+          { errors: fileResult.errors },
+          errorMsg
+        );
+      } else {
+        webSocketStreamer.streamProgressUpdate(
+          taskId,
+          'execution',
+          'file_operations',
+          'completed',
+          {
+            created: fileResult.created.length,
+            modified: fileResult.modified.length,
+            edited: fileResult.edited.length
+          }
+        );
       }
 
       // Phase 3: Compilation Validation (with self-heal loop - i[27])
       console.log('\n[Foreman:Execution] Phase 3: Compilation Validation');
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'compilation',
+        'started'
+      );
 
       // HARDENING-13: Small delay to ensure files are fully written to disk
       // This prevents race conditions where tsc runs before file sync completes
@@ -1494,6 +1575,13 @@ export class ExecutionForeman {
       if (!validation.passed && allModifiedFiles.length > 0) {
         console.log('\n[Foreman:Execution] Phase 3b: Compilation Self-Heal (i[27] + Phase 6)');
         console.log(`[Foreman:Execution] Attempting to fix ${validation.output.split('error TS').length - 1} compilation error(s)...`);
+        webSocketStreamer.streamProgressUpdate(
+          taskId,
+          'execution',
+          'self_heal',
+          'started',
+          { errorCount: validation.output.split('error TS').length - 1 }
+        );
 
         // Phase 6: Use FeedbackRouter for intelligent error routing if available
         let feedbackAction: FeedbackAction | null = null;
@@ -1579,6 +1667,13 @@ export class ExecutionForeman {
             if (validation.passed) {
               compilationSelfHealed = true;
               console.log(`[Foreman:Execution] ✓ Self-heal succeeded! Compilation now passes.`);
+              webSocketStreamer.streamProgressUpdate(
+                taskId,
+                'execution',
+                'self_heal',
+                'completed',
+                { attempt: attempt + 1, healed: true }
+              );
 
               // Phase 6: Record pattern success if FeedbackRouter available
               if (this.feedbackRouter && feedbackAction?.patternToUpdate) {
@@ -1596,6 +1691,14 @@ export class ExecutionForeman {
 
         if (!validation.passed) {
           console.log(`[Foreman:Execution] Self-heal exhausted after ${compilationAttempts} attempts`);
+          webSocketStreamer.streamProgressUpdate(
+            taskId,
+            'execution',
+            'self_heal',
+            'failed',
+            { attempts: compilationAttempts },
+            'Self-heal exhausted'
+          );
 
           // Phase 6: Record pattern failure if FeedbackRouter available
           if (this.feedbackRouter && feedbackAction?.patternToUpdate) {
@@ -1613,6 +1716,12 @@ export class ExecutionForeman {
       // Phase 4: Tool Building (i[18] - Hard Problem #5)
       // Generate and run task-specific validation tools
       console.log('\n[Foreman:Execution] Phase 4: Tool Building (i[18])');
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'validation',
+        'started'
+      );
       let validationSummary: ValidationSummary | undefined;
       let validationPassed = true;
 
@@ -1632,12 +1741,37 @@ export class ExecutionForeman {
             validationPassed = validationSummary.overallPassed;
 
             console.log(`[Foreman:Execution] Tool Building: ${validationSummary.passed}/${validationSummary.totalTools} validations passed`);
+            webSocketStreamer.streamProgressUpdate(
+              taskId,
+              'execution',
+              'validation',
+              validationPassed ? 'completed' : 'failed',
+              {
+                passed: validationSummary.passed,
+                total: validationSummary.totalTools
+              }
+            );
           } else {
             console.log('[Foreman:Execution] No validation tools generated');
+            webSocketStreamer.streamProgressUpdate(
+              taskId,
+              'execution',
+              'validation',
+              'completed',
+              { noToolsGenerated: true }
+            );
           }
         }
       } catch (toolError) {
         console.warn('[Foreman:Execution] Tool Building error (non-fatal):', toolError);
+        webSocketStreamer.streamProgressUpdate(
+          taskId,
+          'execution',
+          'validation',
+          'failed',
+          undefined,
+          toolError instanceof Error ? toolError.message : 'Unknown tool error'
+        );
         // Tool Building failures are non-fatal - we still have compilation check
       }
 
@@ -1785,12 +1919,36 @@ export class ExecutionForeman {
       console.log(`  Total Execution: $${totalCost.toFixed(4)}`);
 
       console.log(`\n[Foreman:Execution] Complete: ${result.success ? 'SUCCESS' : 'ISSUES FOUND'}`);
+      
+      // Stream final execution completion
+      webSocketStreamer.streamProgressUpdate(
+        taskId,
+        'execution',
+        'complete',
+        result.success ? 'completed' : 'failed',
+        {
+          filesCreated: result.filesCreated.length,
+          filesModified: result.filesModified.length,
+          compilationPassed: result.compilationPassed,
+          validationPassed: result.validationPassed
+        },
+        result.error
+      );
+      
       return result;
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       const stack = error instanceof Error ? error.stack : undefined;
       console.error(`[Foreman:Execution] Error: ${message}`);
+      
+      // Stream error event
+      webSocketStreamer.streamError(
+        taskId,
+        message,
+        'execution',
+        { stack: stack?.substring(0, 500) }
+      );
 
       taskManager.transitionState(taskId, 'failed', this.instanceId, message);
 

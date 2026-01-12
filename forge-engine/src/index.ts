@@ -102,7 +102,7 @@ export class ForgeEngine {
     // Log WebSocket streaming status
     const streamStatus = webSocketStreamer.getStatus();
     if (streamStatus.enabled) {
-      console.log(`[WebSocket] Streaming ${streamStatus.connected ? 'CONNECTED' : 'DISCONNECTED'} to ${streamStatus.url}`);
+      console.log(`[WebSocket] Streaming ${streamStatus.connected ? 'CONNECTED' : 'DISCONNECTED'} on port ${streamStatus.port}`);
       if (streamStatus.queuedEvents > 0) {
         console.log(`[WebSocket] ${streamStatus.queuedEvents} events queued`);
       }
@@ -251,7 +251,10 @@ export class ForgeEngine {
     const preparation = await this.preparationForeman.prepareWithLLM(
       task.rawRequest,
       projectPath,
-      { historicalContext }
+      { 
+        historicalContext,
+        taskId: intake.taskId
+      }
     );
 
     if (!preparation.success) {
@@ -304,13 +307,46 @@ export class ForgeEngine {
     console.log('PHASE 3: PREPARATION QUALITY EVALUATION (i[7])');
     console.log('─'.repeat(40));
 
+    // Stream quality evaluation phase entry
+    webSocketStreamer.streamPhaseTransition(
+      intake.taskId,
+      'prepared',
+      'reviewing',
+      this.instanceId,
+      'Starting quality evaluation of ContextPackage'
+    );
+
     tracer.startStep('quality_evaluation');
+    
+    // Stream quality evaluation progress
+    webSocketStreamer.streamProgressUpdate(
+      intake.taskId,
+      'quality_evaluation',
+      'evaluating_context_package',
+      'started'
+    );
+    
     const pkg = preparation.package!;
     const qualityEval = await llmClient.evaluateContextPackage(pkg, projectPath);
     tracer.endStep(qualityEval.passed ? 'success' : 'failure', {
       score: qualityEval.score,
       issueCount: qualityEval.issues.length,
     });
+
+    // Stream quality evaluation completion
+    webSocketStreamer.streamProgressUpdate(
+      intake.taskId,
+      'quality_evaluation',
+      'evaluation_completed',
+      qualityEval.passed ? 'completed' : 'failed',
+      {
+        score: qualityEval.score,
+        passed: qualityEval.passed,
+        method: qualityEval.method,
+        issueCount: qualityEval.issues.length,
+        strengthCount: qualityEval.strengths.length
+      }
+    );
 
     console.log(`\n[Quality Evaluation] Method: ${qualityEval.method}`);
     console.log(`[Quality Evaluation] Score: ${qualityEval.score}/100`);
