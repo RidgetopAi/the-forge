@@ -84,22 +84,70 @@ export interface CompletionEvent extends WebSocketEvent {
 
 export class WebSocketStreamer {
   private port?: number;
+  private serverUrl?: string;
   private server?: http.Server;
   private wss?: WebSocketServer;
+  private clientWs?: WebSocket;
   private isListening: boolean = false;
+  private isClientConnected: boolean = false;
   private connectedClients: Set<WebSocket> = new Set();
   private eventQueue: WebSocketEvent[] = [];
   private maxQueueSize: number = 100;
+  private mode: 'disabled' | 'server' | 'client' = 'disabled';
 
   constructor() {
     const portEnv = process.env.FORGE_WEBSOCKET_PORT;
-    this.port = portEnv ? parseInt(portEnv, 10) : undefined;
-    
-    if (this.port) {
-      console.log(`[WebSocketStreamer] Starting WebSocket server on port ${this.port}`);
+    const serverUrlEnv = process.env.FORGE_WEBSOCKET_URL;
+
+    // Priority: FORGE_WEBSOCKET_URL (client mode) > FORGE_WEBSOCKET_PORT (server mode)
+    if (serverUrlEnv) {
+      // Client mode: connect to existing server
+      this.serverUrl = serverUrlEnv;
+      this.mode = 'client';
+      console.log(`[WebSocketStreamer] Client mode - will connect to ${this.serverUrl}`);
+      this.connectAsClient();
+    } else if (portEnv) {
+      // Server mode: start our own server (only used by --serve)
+      this.port = parseInt(portEnv, 10);
+      this.mode = 'server';
+      console.log(`[WebSocketStreamer] Server mode - starting on port ${this.port}`);
       this.startServer();
     } else {
-      console.log('[WebSocketStreamer] No FORGE_WEBSOCKET_PORT configured - streaming disabled');
+      console.log('[WebSocketStreamer] No FORGE_WEBSOCKET_PORT or FORGE_WEBSOCKET_URL configured - streaming disabled');
+    }
+  }
+
+  /**
+   * Connect to an existing WebSocket server as a client
+   */
+  private async connectAsClient(): Promise<void> {
+    if (!this.serverUrl || this.isClientConnected) {
+      return;
+    }
+
+    try {
+      this.clientWs = new WebSocket(this.serverUrl);
+
+      this.clientWs.on('open', () => {
+        console.log(`[WebSocketStreamer] ✓ Connected to server at ${this.serverUrl}`);
+        this.isClientConnected = true;
+        this.flushEventQueue();
+      });
+
+      this.clientWs.on('close', (code) => {
+        console.log(`[WebSocketStreamer] ✗ Disconnected from server (code: ${code})`);
+        this.isClientConnected = false;
+        // Try to reconnect after a delay
+        setTimeout(() => this.connectAsClient(), 2000);
+      });
+
+      this.clientWs.on('error', (error) => {
+        console.warn(`[WebSocketStreamer] Connection error: ${error.message}`);
+        this.isClientConnected = false;
+      });
+
+    } catch (error) {
+      console.warn(`[WebSocketStreamer] Failed to connect as client: ${error}`);
     }
   }
 
@@ -174,14 +222,29 @@ export class WebSocketStreamer {
    * Send event to all connected clients or queue for later
    */
   private sendEvent(event: WebSocketEvent): void {
-    if (!this.port) {
+    if (this.mode === 'disabled') {
       return; // Streaming disabled
     }
 
-    if (this.isListening && this.connectedClients.size > 0) {
-      this.broadcastToClients(event);
+    if (this.mode === 'client') {
+      // Client mode: send to server
+      if (this.isClientConnected && this.clientWs?.readyState === WebSocket.OPEN) {
+        try {
+          this.clientWs.send(JSON.stringify(event));
+        } catch (error) {
+          console.warn(`[WebSocketStreamer] Failed to send to server: ${error}`);
+          this.queueEvent(event);
+        }
+      } else {
+        this.queueEvent(event);
+      }
     } else {
-      this.queueEvent(event);
+      // Server mode: broadcast to connected clients
+      if (this.isListening && this.connectedClients.size > 0) {
+        this.broadcastToClients(event);
+      } else {
+        this.queueEvent(event);
+      }
     }
   }
 
@@ -225,20 +288,39 @@ export class WebSocketStreamer {
   }
 
   /**
-   * Send all queued events to connected clients
+   * Send all queued events to connected clients or server
    */
   private flushEventQueue(): void {
-    if (!this.isListening || this.eventQueue.length === 0 || this.connectedClients.size === 0) {
+    if (this.eventQueue.length === 0) {
       return;
     }
 
-    console.log(`[WebSocketStreamer] Flushing ${this.eventQueue.length} queued events to ${this.connectedClients.size} client(s)`);
-    
-    const events = [...this.eventQueue];
-    this.eventQueue = [];
-    
-    for (const event of events) {
-      this.broadcastToClients(event);
+    if (this.mode === 'client') {
+      // Client mode: send to server
+      if (!this.isClientConnected || this.clientWs?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      console.log(`[WebSocketStreamer] Flushing ${this.eventQueue.length} queued events to server`);
+      const events = [...this.eventQueue];
+      this.eventQueue = [];
+      for (const event of events) {
+        try {
+          this.clientWs!.send(JSON.stringify(event));
+        } catch (error) {
+          console.warn(`[WebSocketStreamer] Failed to flush event to server: ${error}`);
+        }
+      }
+    } else {
+      // Server mode: broadcast to clients
+      if (!this.isListening || this.connectedClients.size === 0) {
+        return;
+      }
+      console.log(`[WebSocketStreamer] Flushing ${this.eventQueue.length} queued events to ${this.connectedClients.size} client(s)`);
+      const events = [...this.eventQueue];
+      this.eventQueue = [];
+      for (const event of events) {
+        this.broadcastToClients(event);
+      }
     }
   }
 
@@ -399,64 +481,76 @@ export class WebSocketStreamer {
   }
 
   /**
-   * Stop the WebSocket server and close all connections
+   * Stop the WebSocket server/client and close all connections
    */
   disconnect(): void {
-    if (this.wss) {
-      console.log('[WebSocketStreamer] Closing WebSocket server...');
-      
-      // Close all client connections
-      for (const client of this.connectedClients) {
-        client.close();
+    if (this.mode === 'client') {
+      // Client mode: close connection to server
+      if (this.clientWs) {
+        console.log('[WebSocketStreamer] Closing client connection...');
+        this.clientWs.close();
+        this.clientWs = undefined;
       }
-      this.connectedClients.clear();
-      
-      // Close the WebSocket server
-      this.wss.close();
+      this.isClientConnected = false;
+    } else if (this.mode === 'server') {
+      // Server mode: close server
+      if (this.wss) {
+        console.log('[WebSocketStreamer] Closing WebSocket server...');
+        for (const client of this.connectedClients) {
+          client.close();
+        }
+        this.connectedClients.clear();
+        this.wss.close();
+      }
+      if (this.server) {
+        this.server.close();
+      }
+      this.isListening = false;
     }
-    
-    if (this.server) {
-      this.server.close();
-    }
-    
-    this.isListening = false;
   }
 
   /**
    * Check if streaming is enabled
    */
   isEnabled(): boolean {
-    return !!this.port;
+    return this.mode !== 'disabled';
   }
 
   /**
-   * Check if server is currently listening
+   * Check if connected (server listening or client connected)
    */
   isStreamingConnected(): boolean {
+    if (this.mode === 'client') {
+      return this.isClientConnected;
+    }
     return this.isListening;
   }
 
   /**
-   * Get number of connected clients
+   * Get number of connected clients (server mode only)
    */
   getConnectedClientCount(): number {
     return this.connectedClients.size;
   }
 
   /**
-   * Get server status
+   * Get streamer status
    */
   getStatus(): {
     enabled: boolean;
     connected: boolean;
+    mode: 'disabled' | 'server' | 'client';
     port?: number;
+    serverUrl?: string;
     connectedClients: number;
     queuedEvents: number;
   } {
     return {
-      enabled: !!this.port,
-      connected: this.isListening,
+      enabled: this.mode !== 'disabled',
+      connected: this.isStreamingConnected(),
+      mode: this.mode,
       port: this.port,
+      serverUrl: this.serverUrl,
       connectedClients: this.connectedClients.size,
       queuedEvents: this.eventQueue.length,
     };
