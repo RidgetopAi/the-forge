@@ -462,5 +462,20 @@ export class MandrelClient {
   }
 }
 
-// Singleton instance for convenience
-export const mandrel = new MandrelClient('the-forge');
+// Singleton instances for convenience
+
+// centralMandrel always points to 'the-forge' project
+export const centralMandrel = new MandrelClient('the-forge');
+
+// mandrel uses environment variable with fallback to 'the-forge'
+export const mandrel = new MandrelClient(process.env.FORGE_MANDREL_PROJECT || 'the-forge');
+
+/**
+ * Get the appropriate storage client based on context type
+ */
+export function getStorageClient(contextType: 'pattern' | 'error' | 'trace' | 'decision'): MandrelClient {
+  if (contextType === 'pattern' || contextType === 'error') {
+    return centralMandrel;
+  }
+  return mandrel;
+}

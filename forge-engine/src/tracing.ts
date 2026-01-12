@@ -248,6 +248,7 @@ export class ExecutionTracer {
 
   /**
    * Store the trace to Mandrel for later retrieval
+   * Uses the project-specific mandrel client for proper project context
    */
   async storeToMandrel(): Promise<void> {
     const trace = this.trace;

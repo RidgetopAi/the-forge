@@ -52,7 +52,7 @@ import {
 import { TierRouter, calculateCost } from '../tiers.js';
 import { getPatternTracker } from '../pattern-tracker.js';
 import { taskManager } from '../state.js';
-import { mandrel } from '../mandrel.js';
+import { mandrel, centralMandrel } from '../mandrel.js';
 import { webSocketStreamer } from '../websocket-streamer.js';
 import { processFilesWithBudget, TokenCounter, type BudgetedFile } from '../context-budget.js';
 import {
@@ -2145,7 +2145,7 @@ ${compilationOutput.substring(0, 500)}
 \`\`\`
 `;
 
-      await mandrel.storeContext(
+      await centralMandrel.storeContext(
         content,
         'error',
         ['compilation-error', 'learning', projectName, this.instanceId]

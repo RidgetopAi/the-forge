@@ -14,7 +14,7 @@
  */
 
 import { z } from 'zod';
-import { MandrelClient, mandrel as defaultMandrel } from './mandrel.js';
+import { MandrelClient, centralMandrel, mandrel as defaultMandrel } from './mandrel.js';
 
 // ============================================================================
 // Pattern Score Schema
@@ -49,7 +49,7 @@ export class PatternTracker {
   private loaded: boolean = false;
 
   constructor(mandrelClient?: MandrelClient) {
-    this.mandrelClient = mandrelClient ?? defaultMandrel;
+    this.mandrelClient = mandrelClient ?? centralMandrel;
   }
 
   // --------------------------------------------------------------------------
@@ -210,7 +210,7 @@ export class PatternTracker {
   }
 
   /**
-   * Persist a pattern score to Mandrel.
+   * Persist a pattern score to centralMandrel.
    *
    * Stores the pattern as a planning context with tags for retrieval.
    */
@@ -218,13 +218,13 @@ export class PatternTracker {
     try {
       const content = JSON.stringify(pattern, null, 2);
 
-      await this.mandrelClient.storeContext(
+      await centralMandrel.storeContext(
         content,
         'planning',
         [PATTERN_SCORE_TAG, pattern.patternId]
       );
 
-      console.log(`[PatternTracker] Persisted pattern "${pattern.name}" to Mandrel.`);
+      console.log(`[PatternTracker] Persisted pattern "${pattern.name}" to centralMandrel.`);
     } catch (error) {
       console.warn(`[PatternTracker] Failed to persist pattern "${pattern.name}":`, error);
     }
