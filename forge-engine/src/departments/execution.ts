@@ -355,13 +355,15 @@ class CodeGenerationWorker {
       }
 
       // i[22]: Use tool_use with tool_choice: 'any' to force structured output
-      const response = await this.client.messages.create({
+      // Use streaming to handle long-running requests (required for 24000 max_tokens)
+      const stream = this.client.messages.stream({
         model: this.model,
         max_tokens: 24000, // Increased from 8000 - complex Rust tasks need more output space
         tools: [CODE_GENERATION_TOOL],
         tool_choice: { type: 'any' }, // Force the model to use a tool
         messages: [{ role: 'user', content: prompt }],
       });
+      const response = await stream.finalMessage();
 
       // Extract tool use from response
       const toolUse = response.content.find(
@@ -415,13 +417,15 @@ The files array CANNOT be empty. Generate at least one file with actual code.
 
 Call submit_code_changes now with the actual file contents:`;
 
-        const retryResponse = await this.client.messages.create({
+        // Use streaming for retry too
+        const retryStream = this.client.messages.stream({
           model: this.model,
           max_tokens: 24000, // Increased from 8000 - complex Rust tasks need more output space
           tools: [CODE_GENERATION_TOOL],
           tool_choice: { type: 'any' },
           messages: [{ role: 'user', content: retryPrompt }],
         });
+        const retryResponse = await retryStream.finalMessage();
 
         const retryToolUse = retryResponse.content.find(
           (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
