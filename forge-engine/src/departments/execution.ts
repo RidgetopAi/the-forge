@@ -357,7 +357,7 @@ class CodeGenerationWorker {
       // i[22]: Use tool_use with tool_choice: 'any' to force structured output
       const response = await this.client.messages.create({
         model: this.model,
-        max_tokens: 8000,
+        max_tokens: 24000, // Increased from 8000 - complex Rust tasks need more output space
         tools: [CODE_GENERATION_TOOL],
         tool_choice: { type: 'any' }, // Force the model to use a tool
         messages: [{ role: 'user', content: prompt }],
@@ -417,7 +417,7 @@ Call submit_code_changes now with the actual file contents:`;
 
         const retryResponse = await this.client.messages.create({
           model: this.model,
-          max_tokens: 8000,
+          max_tokens: 24000, // Increased from 8000 - complex Rust tasks need more output space
           tools: [CODE_GENERATION_TOOL],
           tool_choice: { type: 'any' },
           messages: [{ role: 'user', content: retryPrompt }],
