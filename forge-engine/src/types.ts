@@ -112,11 +112,12 @@ export const ContextPackage = z.object({
   })),
 
   // Previous Attempts (learning from history)
+  // HARDENING-17: Add defaults for fields LLM sometimes omits
   history: z.object({
     previousAttempts: z.array(z.object({
-      what: z.string(),
-      result: z.string(),
-      lesson: z.string(),
+      what: z.string().default('No description provided'),
+      result: z.string().default('Unknown result'),
+      lesson: z.string().default('No lesson recorded'),
     })),
     // HARDENING-8/9: Accept multiple formats from LLM, normalize to { decision, rationale }
     // LLM may return: { decision, rationale }, { title, decision, rationale }, { title, rationale }, or plain string
@@ -486,6 +487,55 @@ export type ForgeRunResult = z.infer<typeof ForgeRunResult>;
 /**
  * Helper to create a StructuredFailure from common error patterns.
  */
+
+// ============================================================================
+// WebSocket Message Types
+// ============================================================================
+
+/**
+ * Message sent by client to submit a new task for execution
+ */
+export const SubmitTaskMessage = z.object({
+  type: z.literal('submit_task'),
+  projectPath: z.string(),
+  request: z.string(),
+  execute: z.boolean().default(false),
+});
+export type SubmitTaskMessage = z.infer<typeof SubmitTaskMessage>;
+
+/**
+ * Message sent by client to switch Mandrel project context
+ */
+export const MandrelSwitchMessage = z.object({
+  type: z.literal('mandrel_switch'),
+  project: z.string(),
+});
+export type MandrelSwitchMessage = z.infer<typeof MandrelSwitchMessage>;
+
+/**
+ * Message sent by client in response to human sync request
+ */
+export const HumanSyncResponseMessage = z.object({
+  type: z.literal('human_sync_response'),
+  requestId: z.string(),
+  optionId: z.string(),
+  notes: z.string().optional(),
+});
+export type HumanSyncResponseMessage = z.infer<typeof HumanSyncResponseMessage>;
+
+/**
+ * Response sent by server to confirm message processing
+ */
+export const ServerResponse = z.object({
+  type: z.literal('server_response'),
+  messageType: z.string(),
+  success: z.boolean(),
+  message: z.string().optional(),
+  taskId: z.string().optional(),
+  error: z.string().optional(),
+});
+export type ServerResponse = z.infer<typeof ServerResponse>;
+
 // ============================================================================
 // Benchmark Configuration
 // ============================================================================

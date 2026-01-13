@@ -476,12 +476,17 @@ export const ambiguousTargetTrigger: HumanSyncTrigger = {
     const request = ctx.task?.rawRequest ?? '';
     
     // i[34]: Detect if this is an ADD task (creating something new)
-    // Pattern: starts with "add" or contains "add a/an/and" before the type mention
+    // Pattern: starts with "add" or contains "add a/an/method/function/class/etc"
+    // HARDENING-18: Expanded to match "add method X", "add function X", etc.
     const isAddTask = /^add\b/i.test(request.trim()) ||
-                      /\badd\s+(a|an|and\s+export)\s+/i.test(request);
+                      /\badd\s+(a|an|and\s+export|method|function|class|interface|type|property|field|event)\s+/i.test(request);
     const isCreateTask = /^create\b/i.test(request.trim()) ||
-                         /\bcreate\s+(a|an)\s+/i.test(request);
-    const isNewThingTask = isAddTask || isCreateTask;
+                         /\bcreate\s+(a|an|new|method|function|class|interface|type)\s+/i.test(request);
+    // Also detect "implement X" and "integrate X" patterns - implementing/integrating something new
+    const isImplementTask = /\bimplement\s+(a|an|new|method|function|bidirectional|websocket)/i.test(request);
+    const isIntegrateTask = /^integrate\b/i.test(request.trim()) ||
+                            /\bintegrate\s+(a|an|new|human|websocket|bidirectional)/i.test(request);
+    const isNewThingTask = isAddTask || isCreateTask || isImplementTask || isIntegrateTask;
 
     // i[38]: Detect REFACTOR tasks - function names won't match file paths
     const isRefactorTask = pkg.projectType === 'refactor' ||
@@ -542,6 +547,7 @@ export class HumanSyncService {
   private instanceId: string;
   private triggers: HumanSyncTrigger[];
   private pendingRequests: Map<string, HumanSyncRequest>;
+  private webSocketResponseHandler?: (requestId: string, optionId: string, notes?: string) => Promise<void>;
 
   constructor(instanceId: string) {
     this.instanceId = instanceId;
@@ -561,6 +567,120 @@ export class HumanSyncService {
   addTrigger(trigger: HumanSyncTrigger): void {
     this.triggers.push(trigger);
     this.triggers.sort((a, b) => b.priority - a.priority);
+  }
+
+  /**
+   * Send Human Sync request via WebSocket to connected clients
+   */
+  sendViaWebSocket(
+    request: HumanSyncRequest,
+    question: GeneratedQuestion
+  ): void {
+    // Import webSocketStreamer locally to avoid circular dependency
+    const { webSocketStreamer } = require('./websocket-streamer.js');
+    
+    const event = {
+      type: 'human_sync_request',
+      timestamp: new Date().toISOString(),
+      taskId: request.taskId,
+      data: {
+        requestId: request.id,
+        trigger: request.trigger,
+        question: question.question,
+        context: question.context,
+        options: question.options,
+        allowFreeform: question.allowFreeform,
+        urgency: question.urgency,
+        triggeredBy: question.triggeredBy,
+      },
+    };
+
+    // Use broadcastEvent method to send to connected clients
+    webSocketStreamer.broadcastEvent(event);
+    
+    console.log(`[HumanSync] Sent request ${request.id} via WebSocket to connected clients`);
+  }
+
+  /**
+   * Register callback for WebSocket-based Human Sync responses
+   */
+  registerWebSocketResponseHandler(
+    handler: (requestId: string, optionId: string, notes?: string) => Promise<void>
+  ): void {
+    this.webSocketResponseHandler = handler;
+    console.log('[HumanSync] WebSocket response handler registered');
+  }
+
+  /**
+   * Wait for response - uses WebSocket if clients connected, falls back to CLI
+   */
+  async waitForResponse(
+    requestId: string,
+    timeoutMs: number = 300000 // 5 minutes
+  ): Promise<{
+    success: boolean;
+    response?: {
+      selectedOption: string;
+      additionalNotes?: string;
+    };
+    method: 'websocket' | 'cli';
+    timedOut?: boolean;
+  }> {
+    const { webSocketStreamer } = require('./websocket-streamer.js');
+    
+    // Check if WebSocket clients are connected
+    const hasWebSocketClients = webSocketStreamer.getConnectedClientCount() > 0;
+    
+    if (hasWebSocketClients && this.webSocketResponseHandler) {
+      console.log(`[HumanSync] Waiting for WebSocket response to ${requestId}...`);
+      
+      return new Promise((resolve) => {
+        let resolved = false;
+        
+        // Set up timeout
+        const timeout = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            console.log(`[HumanSync] WebSocket response timeout after ${timeoutMs}ms`);
+            resolve({ success: false, method: 'websocket', timedOut: true });
+          }
+        }, timeoutMs);
+        
+        // Set up response handler (one-time)
+        const originalHandler = this.webSocketResponseHandler;
+        this.webSocketResponseHandler = async (responseRequestId, optionId, notes) => {
+          if (responseRequestId === requestId && !resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            
+            // Restore original handler
+            this.webSocketResponseHandler = originalHandler;
+            
+            console.log(`[HumanSync] Received WebSocket response: ${optionId}`);
+            resolve({
+              success: true,
+              response: {
+                selectedOption: optionId,
+                additionalNotes: notes,
+              },
+              method: 'websocket',
+            });
+          } else if (!resolved && originalHandler) {
+            // Call original handler for other requests
+            await originalHandler(responseRequestId, optionId, notes);
+          }
+        };
+      });
+    } else {
+      // Fall back to CLI mode
+      console.log(`[HumanSync] No WebSocket clients connected, falling back to CLI mode`);
+      console.log(`[HumanSync] Use: npx tsx src/index.ts --respond ${requestId} <option-id>`);
+      
+      return {
+        success: false,
+        method: 'cli',
+      };
+    }
   }
 
   /**

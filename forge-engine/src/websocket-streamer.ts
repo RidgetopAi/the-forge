@@ -12,9 +12,10 @@
  * - JSON event format for easy consumption
  */
 
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import * as http from 'node:http';
 import type { TaskState, ForgeTask } from './types.js';
+import { SubmitTaskMessage, MandrelSwitchMessage, HumanSyncResponseMessage, type ServerResponse } from './types.js';
 import type { ExecutionTrace, TraceStep } from './tracing.js';
 import type { QualityEvaluation } from './llm.js';
 
@@ -23,7 +24,7 @@ import type { QualityEvaluation } from './llm.js';
 // ============================================================================
 
 export interface WebSocketEvent {
-  type: 'phase_transition' | 'progress_update' | 'trace_step' | 'error' | 'completion';
+  type: 'phase_transition' | 'progress_update' | 'trace_step' | 'error' | 'completion' | 'human_sync_request';
   timestamp: string;
   taskId: string;
   data: Record<string, unknown>;
@@ -78,6 +79,25 @@ export interface CompletionEvent extends WebSocketEvent {
   };
 }
 
+export interface HumanSyncRequestEvent extends WebSocketEvent {
+  type: 'human_sync_request';
+  data: {
+    requestId: string;
+    trigger: string;
+    question: string;
+    context: string;
+    options: Array<{
+      id: string;
+      label: string;
+      description: string;
+      impact?: string;
+    }>;
+    allowFreeform: boolean;
+    urgency: 'low' | 'medium' | 'high' | 'critical';
+    triggeredBy: string[];
+  };
+}
+
 // ============================================================================
 // WebSocket Streamer
 // ============================================================================
@@ -94,6 +114,8 @@ export class WebSocketStreamer {
   private eventQueue: WebSocketEvent[] = [];
   private maxQueueSize: number = 100;
   private mode: 'disabled' | 'server' | 'client' = 'disabled';
+  private onTaskSubmittedCallback?: (projectPath: string, request: string, execute: boolean) => Promise<void>;
+  private humanSyncService?: any; // Late-bound to avoid circular dependency
 
   constructor() {
     const portEnv = process.env.FORGE_WEBSOCKET_PORT;
@@ -188,14 +210,9 @@ export class WebSocketStreamer {
           this.connectedClients.delete(ws);
         });
 
-        // Optional: Handle messages from clients (for future bidirectional communication)
+        // Handle messages from clients (bidirectional communication)
         ws.on('message', (data) => {
-          try {
-            const message = JSON.parse(data.toString());
-            console.log(`[WebSocketStreamer] Message from client ${clientId}:`, message);
-          } catch {
-            // Ignore malformed messages
-          }
+          this.handleIncomingMessage(data, ws, clientId);
         });
       });
 
@@ -531,6 +548,257 @@ export class WebSocketStreamer {
    */
   getConnectedClientCount(): number {
     return this.connectedClients.size;
+  }
+
+  /**
+   * Register callback for task submission
+   */
+  onTaskSubmitted(callback: (projectPath: string, request: string, execute: boolean) => Promise<void>): void {
+    this.onTaskSubmittedCallback = callback;
+  }
+
+  /**
+   * Set Human Sync service for WebSocket response handling
+   */
+  setHumanSyncService(service: any): void {
+    this.humanSyncService = service;
+    
+    // Register self as response handler with the service
+    if (service.registerWebSocketResponseHandler) {
+      service.registerWebSocketResponseHandler(async (requestId: string, optionId: string, notes?: string) => {
+        console.log(`[WebSocketStreamer] Handling human sync response: ${requestId} -> ${optionId}`);
+        // The response is already processed by the service's handler
+        // This is just for logging/monitoring
+      });
+    }
+  }
+
+  /**
+   * Send event to connected clients (exposed for HumanSyncService)
+   * Note: Renamed to broadcastEvent to avoid collision with private sendEvent
+   */
+  broadcastEvent(event: WebSocketEvent): void {
+    // Call the private sendEvent method
+    this['sendEvent'](event);
+  }
+
+  /**
+   * Handle incoming message from WebSocket client
+   */
+  private async handleIncomingMessage(data: RawData, ws: WebSocket, clientId: string): Promise<void> {
+    try {
+      const messageStr = data.toString();
+      console.log(`[WebSocketStreamer] Message from client ${clientId}: ${messageStr.slice(0, 200)}${messageStr.length > 200 ? '...' : ''}`);
+      
+      const messageData = JSON.parse(messageStr);
+      
+      // Route by message type
+      switch (messageData.type) {
+        case 'submit_task':
+          await this.handleSubmitTask(messageData, ws);
+          break;
+        case 'mandrel_switch':
+          await this.handleMandrelSwitch(messageData, ws);
+          break;
+        case 'human_sync_response':
+          await this.handleHumanSyncResponse(messageData, ws);
+          break;
+        default:
+          this.sendToClient(ws, {
+            type: 'server_response',
+            messageType: messageData.type || 'unknown',
+            success: false,
+            error: `Unknown message type: ${messageData.type}`
+          });
+      }
+    } catch (error) {
+      console.warn(`[WebSocketStreamer] Failed to handle message from client ${clientId}:`, error);
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'unknown',
+        success: false,
+        error: 'Failed to parse message'
+      });
+    }
+  }
+
+  /**
+   * Handle submit_task message
+   */
+  private async handleSubmitTask(message: any, ws: WebSocket): Promise<void> {
+    try {
+      // Validate message structure
+      const parsed = SubmitTaskMessage.parse(message);
+      
+      if (!this.onTaskSubmittedCallback) {
+        this.sendToClient(ws, {
+          type: 'server_response',
+          messageType: 'submit_task',
+          success: false,
+          error: 'Task handler not registered'
+        });
+        return;
+      }
+      
+      // Send confirmation
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'submit_task',
+        success: true,
+        message: 'Task received, processing...'
+      });
+      
+      // Execute task handler asynchronously
+      this.onTaskSubmittedCallback(parsed.projectPath, parsed.request, parsed.execute)
+        .catch(error => {
+          console.error('[WebSocketStreamer] Task execution failed:', error);
+          this.sendToClient(ws, {
+            type: 'server_response',
+            messageType: 'submit_task',
+            success: false,
+            error: `Task execution failed: ${error.message}`
+          });
+        });
+        
+    } catch (error) {
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'submit_task',
+        success: false,
+        error: `Invalid submit_task message: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+  }
+
+  /**
+   * Handle mandrel_switch message
+   */
+  private async handleMandrelSwitch(message: any, ws: WebSocket): Promise<void> {
+    try {
+      // Validate message structure
+      const parsed = MandrelSwitchMessage.parse(message);
+      
+      // Set environment variable for Mandrel project switching
+      process.env.FORGE_MANDREL_PROJECT = parsed.project;
+      
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'mandrel_switch',
+        success: true,
+        message: `Switched to project: ${parsed.project}`
+      });
+      
+    } catch (error) {
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'mandrel_switch',
+        success: false,
+        error: `Invalid mandrel_switch message: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+  }
+
+  /**
+   * Handle human_sync_response message
+   */
+  private async handleHumanSyncResponse(message: any, ws: WebSocket): Promise<void> {
+    try {
+      // Validate message structure
+      const parsed = HumanSyncResponseMessage.parse(message);
+      
+      console.log(`[WebSocketStreamer] Human sync response: ${parsed.requestId} -> ${parsed.optionId}`);
+      
+      // Route to Human Sync Service if available
+      if (this.humanSyncService && this.humanSyncService.webSocketResponseHandler) {
+        await this.humanSyncService.webSocketResponseHandler(
+          parsed.requestId,
+          parsed.optionId,
+          parsed.notes
+        );
+        
+        this.sendToClient(ws, {
+          type: 'server_response',
+          messageType: 'human_sync_response',
+          success: true,
+          message: 'Human sync response processed'
+        });
+      } else {
+        // Late-bind to avoid circular dependency
+        try {
+          const { loadRequestFromMandrel, markRequestResponded } = await import('./human-sync.js');
+          
+          // Process the response directly
+          const loaded = await loadRequestFromMandrel(parsed.requestId);
+          if (loaded.success && loaded.request) {
+            // Determine action from option
+            const optionLower = parsed.optionId.toLowerCase();
+            let action: 'proceed' | 'modify' | 'abort' | 'retry';
+            
+            if (optionLower.includes('abort') || optionLower.includes('cancel')) {
+              action = 'abort';
+            } else if (optionLower.includes('proceed') || optionLower.includes('execute')) {
+              action = 'proceed';
+            } else if (optionLower.includes('clarify') || optionLower.includes('expand') ||
+                       optionLower.includes('specify') || optionLower.includes('modify')) {
+              action = 'modify';
+            } else {
+              action = 'proceed';
+            }
+            
+            await markRequestResponded(
+              parsed.requestId,
+              loaded.request.taskId,
+              parsed.optionId,
+              action,
+              parsed.notes
+            );
+            
+            this.sendToClient(ws, {
+              type: 'server_response',
+              messageType: 'human_sync_response',
+              success: true,
+              message: `Human sync response recorded with action: ${action}`
+            });
+          } else {
+            this.sendToClient(ws, {
+              type: 'server_response',
+              messageType: 'human_sync_response',
+              success: false,
+              error: 'Could not find original request'
+            });
+          }
+        } catch (importError) {
+          console.error('[WebSocketStreamer] Failed to process human sync response:', importError);
+          this.sendToClient(ws, {
+            type: 'server_response',
+            messageType: 'human_sync_response',
+            success: false,
+            error: 'Failed to process response'
+          });
+        }
+      }
+      
+    } catch (error) {
+      this.sendToClient(ws, {
+        type: 'server_response',
+        messageType: 'human_sync_response',
+        success: false,
+        error: `Invalid human_sync_response message: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+  }
+
+  /**
+   * Send message to a specific WebSocket client
+   */
+  private sendToClient(ws: WebSocket, response: ServerResponse): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify(response));
+      } catch (error) {
+        console.warn(`[WebSocketStreamer] Failed to send response to client:`, error);
+      }
+    }
   }
 
   /**

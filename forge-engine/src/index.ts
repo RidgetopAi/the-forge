@@ -58,6 +58,9 @@ export class ForgeEngine {
     this.preparationForeman = createPreparationForeman(instanceId, this.tierRouter);
     this.executionForeman = createExecutionForeman(instanceId, this.tierRouter);
     this.humanSyncService = createHumanSyncService(instanceId);
+    
+    // Integrate Human Sync with WebSocket for bidirectional communication
+    webSocketStreamer.setHumanSyncService(this.humanSyncService);
   }
 
   /**
@@ -1074,6 +1077,30 @@ async function handleServe(): Promise<void> {
     console.log('[Serve] Connected to Mandrel');
   }
   
+  // Register task handler for WebSocket submissions
+  const engine = new ForgeEngine('serve-mode');
+  webSocketStreamer.onTaskSubmitted(async (projectPath: string, request: string, execute: boolean) => {
+    console.log(`[Serve] Processing task: ${request.slice(0, 100)}${request.length > 100 ? '...' : ''}`);
+    console.log(`[Serve] Project: ${projectPath}`);
+    console.log(`[Serve] Execute: ${execute}`);
+    
+    // Set Mandrel project context from the project path
+    const projectName = projectPath.split('/').pop() || 'unknown';
+    process.env.FORGE_MANDREL_PROJECT = projectName;
+    console.log(`[Serve] Set FORGE_MANDREL_PROJECT to: ${projectName}`);
+    
+    try {
+      const result = await engine.process(request, projectPath, { execute });
+      console.log(`[Serve] Task completed: success=${result.success}, stage=${result.stage}`);
+      if (result.taskId) {
+        console.log(`[Serve] Task ID: ${result.taskId}`);
+      }
+    } catch (error) {
+      console.error(`[Serve] Task execution error:`, error);
+      throw error; // Re-throw to let WebSocket handler send error response
+    }
+  });
+  
   // WebSocket server is already started by the singleton instance
   // We just need to wait for it to be ready and keep the process alive
   const status = webSocketStreamer.getStatus();
@@ -1094,6 +1121,7 @@ async function handleServe(): Promise<void> {
   
   console.log(`[Serve] ✓ Server ready on port ${finalStatus.port}`);
   console.log(`[Serve] Connected clients: ${finalStatus.connectedClients}`);
+  console.log('[Serve] Task handler registered - ready to process submissions');
   console.log('[Serve] Waiting for connections...');
   console.log('');
   console.log('Press Ctrl+C to stop the server');
